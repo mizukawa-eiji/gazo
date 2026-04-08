@@ -1,0 +1,54 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'org.openjfx.javafxplugin' version '0.1.0'
+}
+
+group = 'com.example.gazo'
+version = '1.0-SNAPSHOT'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation('org.cryptomator:cryptofs:2.6.4')
+    implementation('commons-io:commons-io:2.16.1')
+    runtimeOnly('org.slf4j:slf4j-simple:2.0.9')
+    testImplementation('org.junit.jupiter:junit-jupiter:5.10.3')
+}
+
+javafx {
+    version = '21.0.4'
+    modules = ['javafx.controls', 'javafx.graphics']
+}
+
+application {
+    mainClass = 'com.example.gazo.GazoApp'
+}
+
+tasks.register('fatJar', Jar) {
+    group = 'build'
+    description = 'Assembles an executable JAR with dependencies.'
+    archiveClassifier.set('all')
+    manifest {
+        attributes 'Main-Class': application.mainClass.get()
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from(sourceSets.main.output)
+    dependsOn(configurations.runtimeClasspath)
+    from {
+        configurations.runtimeClasspath
+                .findAll { it.name.endsWith('jar') }
+                .collect { zipTree(it) }
+    }
+}
+
+test {
+    useJUnitPlatform()
+}

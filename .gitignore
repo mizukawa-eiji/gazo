@@ -1,0 +1,37 @@
+# Gradle
+.gradle/
+build/
+
+# Java
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+hs_err_pid*.log
+replay_pid*.log
+
+# IDE — IntelliJ / Android Studio
+.idea/
+*.iml
+out/
+
+# IDE — Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# IDE — VS Code (optional: uncomment if you prefer not to commit local settings)
+# .vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs / temp
+*.log
+*.tmp
+*.swp
+*~
