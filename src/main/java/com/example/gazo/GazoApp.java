@@ -1887,12 +1887,23 @@ public final class GazoApp extends Application {
             protected void updateItem(Path item, boolean empty) {
                 super.updateItem(item, empty);
                 if (empty || item == null) {
+                    thumb.setImage(null);
                     setGraphic(null);
                     return;
                 }
-                text.setText(item.getFileName().toString() + "  " + formatImagePixelSize(item));
-                thumb.setImage(loadThumbnail(item, 44, 44));
+                // 選択イベント中に I/O + Image 生成を走らせると Linux/GTK で警告が出ることがあるため、
+                // 次のパルスに回す。
+                final Path rowPath = item;
+                text.setText(rowPath.getFileName().toString());
+                thumb.setImage(null);
                 setGraphic(box);
+                Platform.runLater(() -> {
+                    if (isEmpty() || getItem() == null || !getItem().equals(rowPath)) {
+                        return;
+                    }
+                    text.setText(rowPath.getFileName().toString() + "  " + formatImagePixelSize(rowPath));
+                    thumb.setImage(loadThumbnail(rowPath, 44, 44));
+                });
             }
         });
 
@@ -2070,7 +2081,9 @@ public final class GazoApp extends Application {
                             .filter(p -> !isPendingDelete(p))
                             .toList();
                     int total = images.size();
-                    updateMessage("重複チェック中: 0 / " + total);
+                    long totalPairs = (long) total * (long) Math.max(0, total - 1) / 2L;
+                    long donePairs = 0L;
+                    updateMessage("重複チェック中: 0 / " + total + "  (比較 0 / " + totalPairs + ")");
                     List<List<Path>> exact = new ArrayList<>();
                     List<GazoVaultService.SimilarPair> similar = new ArrayList<>();
                     Map<Path, String> shaCache = new HashMap<>();
@@ -2078,6 +2091,7 @@ public final class GazoApp extends Application {
                     LinkedHashSet<Path> candidates = new LinkedHashSet<>();
 
                     for (int i = 0; i < total; i++) {
+                        updateMessage("重複チェック中: " + i + " / " + total + "  (比較 " + donePairs + " / " + totalPairs + ")");
                         Path current = images.get(i);
                         String shaCurrent = shaCache.computeIfAbsent(current, p -> {
                             try {
@@ -2092,6 +2106,10 @@ public final class GazoApp extends Application {
 
                         for (int j = i + 1; j < total; j++) {
                             Path other = images.get(j);
+                            donePairs++;
+                            if ((donePairs & 255L) == 0L || donePairs == totalPairs) {
+                                updateMessage("重複チェック中: " + i + " / " + total + "  (比較 " + donePairs + " / " + totalPairs + ")");
+                            }
                             String shaOther = shaCache.computeIfAbsent(other, p -> {
                                 try {
                                     return vault.sha256(p);
@@ -2125,7 +2143,8 @@ public final class GazoApp extends Application {
                             candidates.add(current);
                             List<List<Path>> exactSnapshot = new ArrayList<>(exact);
                             List<GazoVaultService.SimilarPair> similarSnapshot = new ArrayList<>(similar);
-                            List<Path> candidateSnapshot = sortPathsByImageAreaDesc(new ArrayList<>(candidates));
+                            // 逐次追加時に項目位置が動くとクリック先がずれるため、追加順（末尾追加）で表示する。
+                            List<Path> candidateSnapshot = new ArrayList<>(candidates);
                             Platform.runLater(() -> {
                                 similarRef.set(similarSnapshot);
                                 exactGroupsRef.set(exactSnapshot);
@@ -2149,12 +2168,12 @@ public final class GazoApp extends Application {
                                 refreshExactGroupKeepUi.run();
                             });
                         }
-                        updateMessage("重複チェック中: " + (i + 1) + " / " + total);
+                        updateMessage("重複チェック中: " + (i + 1) + " / " + total + "  (比較 " + donePairs + " / " + totalPairs + ")");
                     }
                     similar.sort(Comparator.comparingInt(GazoVaultService.SimilarPair::distance));
                     List<List<Path>> exactFinal = new ArrayList<>(exact);
                     List<GazoVaultService.SimilarPair> similarFinal = new ArrayList<>(similar);
-                    List<Path> finalCandidates = sortPathsByImageAreaDesc(new ArrayList<>(candidates));
+                    List<Path> finalCandidates = new ArrayList<>(candidates);
                     Platform.runLater(() -> {
                         similarRef.set(similarFinal);
                         exactGroupsRef.set(exactFinal);
