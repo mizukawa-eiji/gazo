@@ -1,5 +1,6 @@
 package com.example.gazo.cli;
 
+import com.example.gazo.ImportFolderTagging;
 import com.example.gazo.vault.GazoVaultService;
 import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 
@@ -10,8 +11,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -119,7 +122,7 @@ public final class CliImport {
                 }
                 if (Files.isRegularFile(p)) {
                     if (isImageFile(p)) {
-                        failures += importOne(vault, p);
+                        failures += importOne(vault, p, null);
                     } else {
                         err("画像ではありません（スキップ）: " + p);
                         failures++;
@@ -138,9 +141,19 @@ public final class CliImport {
         System.exit(failures > 0 ? 3 : 0);
     }
 
-    private static int importOne(GazoVaultService vault, Path sourceFile) {
+    /**
+     * 取り込み後、{@code tagsToAdd} が非空なら Vault 内ファイルにタグをマージする。
+     *
+     * @param tagsToAdd 単一ファイル取り込み時は {@code null} または空でタグなし。
+     */
+    private static int importOne(GazoVaultService vault, Path sourceFile, Set<String> tagsToAdd) {
         try {
             Path dest = vault.importImage(sourceFile);
+            if (tagsToAdd != null && !tagsToAdd.isEmpty()) {
+                Set<String> tags = new LinkedHashSet<>(vault.getTags(dest));
+                tags.addAll(tagsToAdd);
+                vault.setTags(dest, tags);
+            }
             out("取り込み: " + sourceFile + " -> " + dest.getFileName());
             return 0;
         } catch (IOException e) {
@@ -160,7 +173,7 @@ public final class CliImport {
                             .sorted()
                             .toList();
                     for (Path image : images) {
-                        failures += importOne(vault, image);
+                        failures += importOne(vault, image, ImportFolderTagging.folderTagsForPathUnderRoot(directory, image));
                     }
                 }
             } else {
@@ -171,7 +184,7 @@ public final class CliImport {
                             .sorted()
                             .toList();
                     for (Path image : images) {
-                        failures += importOne(vault, image);
+                        failures += importOne(vault, image, ImportFolderTagging.folderTagsForPathUnderRoot(directory, image));
                     }
                 }
             }

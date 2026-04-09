@@ -32,6 +32,12 @@ application {
     mainClass = 'com.example.gazo.GazoApp'
 }
 
+run {
+    // JavaFX + 大量画像で既定ヒープを超えやすいため
+    minHeapSize = '256m'
+    maxHeapSize = '2g'
+}
+
 def appName = 'Gazo'
 def appVersion = project.version.toString()
 def appIconPath = file('packaging/windows/app-icon.ico')

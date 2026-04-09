@@ -74,6 +74,10 @@ import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Iterator;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageReader;
+import javax.imageio.stream.ImageInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -1249,9 +1253,6 @@ public final class GazoApp extends Application {
 
     private boolean importImagesFromDirectory(Path directory) {
         boolean importedAny = false;
-        String folderTag = directory.getFileName() == null
-                ? ""
-                : directory.getFileName().toString().trim().toLowerCase();
         try (Stream<Path> stream = Files.walk(directory)) {
             List<Path> files = stream
                     .filter(Files::isRegularFile)
@@ -1269,9 +1270,10 @@ public final class GazoApp extends Application {
                             importedPath = vault.importVideo(file);
                         }
                         importedAny = true;
-                        if (!folderTag.isBlank()) {
+                        Set<String> folderTags = ImportFolderTagging.folderTagsForPathUnderRoot(directory, file);
+                        if (!folderTags.isEmpty()) {
                             Set<String> tags = new LinkedHashSet<>(vault.getTags(importedPath));
-                            tags.add(folderTag);
+                            tags.addAll(folderTags);
                             vault.setTags(importedPath, tags);
                         }
                     } catch (IOException e) {
@@ -1583,7 +1585,7 @@ public final class GazoApp extends Application {
                     setGraphic(null);
                     return;
                 }
-                text.setText(item.getFileName().toString());
+                text.setText(item.getFileName().toString() + "  " + formatImagePixelSize(item));
                 thumb.setImage(loadThumbnail(item, 44, 44));
                 setGraphic(box);
             }
@@ -1697,7 +1699,11 @@ public final class GazoApp extends Application {
             for (List<Path> paths : exact) {
                 report.append("グループ ").append(group++).append(":\n");
                 for (Path p : paths) {
-                    report.append("  - ").append(p.getFileName()).append('\n');
+                    report.append("  - ")
+                            .append(p.getFileName())
+                            .append("  ")
+                            .append(formatImagePixelSize(p))
+                            .append('\n');
                 }
             }
         }
@@ -1708,14 +1714,54 @@ public final class GazoApp extends Application {
             for (GazoVaultService.SimilarPair pair : similar) {
                 report.append("  - ")
                         .append(pair.left().getFileName())
+                        .append(" ")
+                        .append(formatImagePixelSize(pair.left()))
                         .append(" <-> ")
                         .append(pair.right().getFileName())
+                        .append(" ")
+                        .append(formatImagePixelSize(pair.right()))
                         .append("  (distance=")
                         .append(pair.distance())
                         .append(")\n");
             }
         }
         return report.toString();
+    }
+
+    /** 画像のピクセル幅×高さ。読み取れない場合は "—"。 */
+    private String formatImagePixelSize(Path path) {
+        try (InputStream in = Files.newInputStream(path)) {
+            ImageInputStream iis = ImageIO.createImageInputStream(in);
+            if (iis != null) {
+                try {
+                    Iterator<ImageReader> readers = ImageIO.getImageReaders(iis);
+                    if (readers.hasNext()) {
+                        ImageReader reader = readers.next();
+                        try {
+                            reader.setInput(iis);
+                            int w = reader.getWidth(0);
+                            int h = reader.getHeight(0);
+                            return w + "×" + h;
+                        } finally {
+                            reader.dispose();
+                        }
+                    }
+                } finally {
+                    iis.close();
+                }
+            }
+        } catch (IOException ignored) {
+            // fall through
+        }
+        try (InputStream in = Files.newInputStream(path)) {
+            Image img = new Image(in);
+            if (img.isError() || img.getWidth() <= 0 || img.getHeight() <= 0) {
+                return "—";
+            }
+            return (int) Math.round(img.getWidth()) + "×" + (int) Math.round(img.getHeight());
+        } catch (IOException e) {
+            return "—";
+        }
     }
 
     private List<Path> collectDuplicateCandidates(List<List<Path>> exact, List<GazoVaultService.SimilarPair> similar) {
@@ -1783,6 +1829,11 @@ public final class GazoApp extends Application {
         copyFileNameButton.setTooltip(new Tooltip("現在表示中のファイル名をコピー"));
         Label label = new Label();
         label.setStyle("-fx-text-fill: #ddd;");
+        Label tagsLine = new Label();
+        tagsLine.setWrapText(true);
+        tagsLine.setStyle("-fx-text-fill: #a8b896;");
+        tagsLine.setVisible(false);
+        tagsLine.setManaged(false);
         Label hint = new Label("← / → または A / D で移動、Esc で閉じる");
         hint.setStyle("-fx-text-fill: #999;");
 
@@ -1792,7 +1843,7 @@ public final class GazoApp extends Application {
         scroll.setFitToWidth(false);
         scroll.setFitToHeight(false);
 
-        VBox bottom = new VBox(6, new HBox(10, fitCheck, tagEditButton, copyFileNameButton, label), hint);
+        VBox bottom = new VBox(6, new HBox(10, fitCheck, tagEditButton, copyFileNameButton, label), tagsLine, hint);
         bottom.setPadding(new Insets(8, 14, 12, 14));
 
         BorderPane root = new BorderPane();
@@ -1801,6 +1852,7 @@ public final class GazoApp extends Application {
         root.setBottom(bottom);
 
         Scene scene = new Scene(root, 1000, 760);
+        tagsLine.maxWidthProperty().bind(scene.widthProperty().subtract(28));
         stage.setScene(scene);
 
         Runnable applyViewMode = () -> {
@@ -1851,6 +1903,24 @@ public final class GazoApp extends Application {
                 sizeText = "  (" + w + " x " + h + ")";
             }
             label.setText((i + 1) + "/" + images.size() + "  " + path.getFileName() + sizeText);
+            try {
+                Set<String> tags = vault.getTags(path);
+                if (tags.isEmpty()) {
+                    tagsLine.setText("");
+                    tagsLine.setVisible(false);
+                    tagsLine.setManaged(false);
+                } else {
+                    List<String> sorted = new ArrayList<>(tags);
+                    Collections.sort(sorted);
+                    tagsLine.setText("#" + String.join(" #", sorted));
+                    tagsLine.setVisible(true);
+                    tagsLine.setManaged(true);
+                }
+            } catch (IOException ex) {
+                tagsLine.setText("タグを読み込めませんでした");
+                tagsLine.setVisible(true);
+                tagsLine.setManaged(true);
+            }
         };
         tagEditButton.setOnAction(e -> {
             Path path = images.get(index.get());
@@ -1926,7 +1996,7 @@ public final class GazoApp extends Application {
             return;
         }
         leftPreview.setImage(loadThumbnail(selected, 220, 220));
-        leftLabel.setText("選択: " + selected.getFileName());
+        leftLabel.setText("選択: " + selected.getFileName() + "  " + formatImagePixelSize(selected));
 
         if (selectedPairs == null || selectedPairs.isEmpty()) {
             rightPreview.setImage(null);
@@ -1937,7 +2007,8 @@ public final class GazoApp extends Application {
         GazoVaultService.SimilarPair best = selectedPairs.get(idx);
         Path other = best.left().equals(selected) ? best.right() : best.left();
         rightPreview.setImage(loadThumbnail(other, 220, 220));
-        rightLabel.setText("比較: " + other.getFileName() + " (d=" + best.distance() + ", " + (idx + 1) + "/" + selectedPairs.size() + ")");
+        rightLabel.setText("比較: " + other.getFileName() + "  " + formatImagePixelSize(other)
+                + " (d=" + best.distance() + ", " + (idx + 1) + "/" + selectedPairs.size() + ")");
     }
 
     private void showLargeCompareDialog(Path selected, List<GazoVaultService.SimilarPair> selectedPairs, int selectedPairIndex) {
@@ -1962,8 +2033,8 @@ public final class GazoApp extends Application {
         right.setFitWidth(640);
         right.setFitHeight(640);
 
-        VBox leftBox = new VBox(6, new Label(selected.getFileName().toString()), left);
-        VBox rightBox = new VBox(6, new Label(other.getFileName() + "  (d=" + pair.distance() + ")"), right);
+        VBox leftBox = new VBox(6, new Label(selected.getFileName().toString() + "  " + formatImagePixelSize(selected)), left);
+        VBox rightBox = new VBox(6, new Label(other.getFileName() + "  " + formatImagePixelSize(other) + "  (d=" + pair.distance() + ")"), right);
         HBox content = new HBox(12, leftBox, rightBox);
         content.setPadding(new Insets(10));
         dialog.getDialogPane().setContent(content);
@@ -2221,9 +2292,12 @@ public final class GazoApp extends Application {
         double canvasH = Math.max(1, canvas.getPrefHeight());
         double sizeRatio = Math.min(canvasW / BASE_CANVAS_WIDTH, canvasH / BASE_CANVAS_HEIGHT);
         sizeRatio = Math.max(0.35, Math.min(3.0, sizeRatio));
+        // メイン「キャンバス」タブのプレビューなど、描画後に canvasSelection が元へ戻るため、
+        // オリジナル表示の ←/→ 用にこの時点の一覧を固定する。
+        List<Path> pathsSnapshot = new ArrayList<>(canvasSelection);
         int index = 0;
-        for (Path path : canvasSelection) {
-            VBox item = createCanvasItem(path, layoutName, interactive, sizeRatio);
+        for (Path path : pathsSnapshot) {
+            VBox item = createCanvasItem(path, layoutName, interactive, sizeRatio, null, pathsSnapshot);
             if (item == null) {
                 continue;
             }
