@@ -13,7 +13,6 @@ import javafx.scene.Scene;
 import javafx.scene.Cursor;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
-import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
@@ -26,7 +25,6 @@ import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.MenuItem;
-import javafx.scene.control.PasswordField;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.Tooltip;
@@ -68,7 +66,6 @@ import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -83,7 +80,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Properties;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeSet;
@@ -95,16 +91,9 @@ import java.util.stream.Stream;
  * 登録画像をスナップ写真風に表示し、Cryptomator 互換 Vault に保存する JavaFX アプリ。
  */
 public final class GazoApp extends Application {
-    private static final String APP_DIR_NAME = ".gazo";
-    private static final String DEFAULT_VAULT_DIR_NAME = "vault";
-    private static final String CONFIG_FILE_NAME = "settings.properties";
-    private static final String CONFIG_KEY_LAST_VAULT_PATH = "lastVaultPath";
     private static final double BASE_CANVAS_WIDTH = 2000.0;
     private static final double BASE_CANVAS_HEIGHT = 1400.0;
-    /** クラスパス上のウィンドウアイコン（PNG）。差し替えはこのファイルを置き換える。 */
-    private static final String APP_ICON_RESOURCE = "/com/example/gazo/app-icon.png";
-
-    private GazoVaultService vault;
+    GazoVaultService vault;
     private Stage primaryStage;
     private FlowPane gallery;
     private FlowPane videoGallery;
@@ -115,10 +104,10 @@ public final class GazoApp extends Application {
     private boolean showFileName = true;
     private boolean showDate = true;
     private boolean showTags = true;
-    private static final List<String> LAYOUT_PRESETS = List.of("コラージュ風", "整列風");
+    static final List<String> LAYOUT_PRESETS = List.of("コラージュ風", "整列風");
     private static final List<String> LIST_VIEW_SIZE_OPTIONS = List.of("小", "中", "大");
-    private final Set<Path> canvasSelection = new LinkedHashSet<>();
-    private final Set<Path> listCheckedSelection = new LinkedHashSet<>();
+    final Set<Path> canvasSelection = new LinkedHashSet<>();
+    final Set<Path> listCheckedSelection = new LinkedHashSet<>();
     private String listViewSize = "中";
 
     /** メイン「キャンバス」タブのプレビュー縮小表示用（ビューポートに合わせる） */
@@ -134,11 +123,11 @@ public final class GazoApp extends Application {
 
     @Override
     public void start(Stage stage) {
-        Path defaultVaultDir = loadInitialVaultPath();
+        Path defaultVaultDir = VaultPathStore.loadInitialVaultPath();
         try {
             openVault(stage, defaultVaultDir);
         } catch (Exception e) {
-            showError("Vault を開けませんでした", e.getMessage());
+            GazoFx.showError("Vault を開けませんでした", e.getMessage());
             Platform.exit();
             return;
         }
@@ -331,7 +320,7 @@ public final class GazoApp extends Application {
 
         Scene scene = new Scene(root, 920, 680);
         stage.setTitle("Gazo — 暗号化フォルダに保存する写真ビューア (JavaFX)");
-        applyAppIcons(stage);
+        GazoFx.applyAppIcons(stage);
         stage.setScene(scene);
         stage.setResizable(true);
         stage.show();
@@ -378,27 +367,6 @@ public final class GazoApp extends Application {
         homeCanvasPreviewHolder.setLayoutY((vh - scaledH) / 2.0);
     }
 
-    private static void applyAppIcons(Stage stage) {
-        InputStream in = GazoApp.class.getResourceAsStream(APP_ICON_RESOURCE);
-        if (in == null) {
-            return;
-        }
-        try (in) {
-            stage.getIcons().add(new Image(in));
-        } catch (IOException ignored) {
-            // アイコン読み込み失敗時は OS 既定のアイコンのまま
-        }
-    }
-
-    private static void bindAppIconToDialog(Dialog<?> dialog) {
-        dialog.setOnShown(e -> {
-            Scene s = dialog.getDialogPane().getScene();
-            if (s != null && s.getWindow() instanceof Stage) {
-                applyAppIcons((Stage) s.getWindow());
-            }
-        });
-    }
-
     private void openVault(Stage stage, Path vaultDir) throws IOException, MasterkeyLoadingFailedException {
         GazoVaultService newVault = new GazoVaultService(vaultDir);
         unlockOrCreate(stage, newVault);
@@ -406,11 +374,11 @@ public final class GazoApp extends Application {
             vault.close();
         }
         vault = newVault;
-        saveLastVaultPath(vault.getVaultPath());
+        VaultPathStore.saveLastVaultPath(vault.getVaultPath());
         reloadCanvasSelectionFromVault("default");
     }
 
-    private void reloadCanvasSelectionFromVault(String canvasName) {
+    void reloadCanvasSelectionFromVault(String canvasName) {
         if (vault == null) {
             return;
         }
@@ -419,49 +387,49 @@ public final class GazoApp extends Application {
             canvasSelection.clear();
             canvasSelection.addAll(paths);
         } catch (IOException e) {
-            showWarn("キャンバス選択の読込", e.getMessage());
+            GazoFx.showWarn("キャンバス選択の読込", e.getMessage());
         }
     }
 
     /** キャンバス選択の並びを Vault に書き込む（トーストなし）。 */
-    private void persistCanvasSelectionToVault(String canvasName) {
+    void persistCanvasSelectionToVault(String canvasName) {
         if (vault == null) {
             return;
         }
         try {
             vault.saveCanvasSelectionOrder(canvasName, new ArrayList<>(canvasSelection));
         } catch (IOException e) {
-            showError("保存エラー", e.getMessage());
+            GazoFx.showError("保存エラー", e.getMessage());
         }
     }
 
     /** 現在のキャンバス画像一覧を指定キャンバス名で Vault に上書きし、完了を通知する。 */
-    private void persistCanvasSelectionToVaultWithFeedback(String canvasName) {
+    void persistCanvasSelectionToVaultWithFeedback(String canvasName) {
         if (vault == null) {
             return;
         }
         try {
             vault.saveCanvasSelectionOrder(canvasName, new ArrayList<>(canvasSelection));
-            showWarn("上書き保存", "「" + canvasName + "」の画像一覧を保存しました。");
+            GazoFx.showWarn("上書き保存", "「" + canvasName + "」の画像一覧を保存しました。");
         } catch (IOException e) {
-            showError("保存エラー", e.getMessage());
+            GazoFx.showError("保存エラー", e.getMessage());
         }
     }
 
-    private void showSlideshow(Stage owner) {
+    void showSlideshow(Stage owner) {
         if (canvasSelection.isEmpty()) {
-            showWarn("スライドショー", "キャンバスに画像を追加してください。");
+            GazoFx.showWarn("スライドショー", "キャンバスに画像を追加してください。");
             return;
         }
         final List<String> layoutNames;
         try {
             layoutNames = new ArrayList<>(vault.listCanvasLayouts());
         } catch (IOException e) {
-            showError("スライドショー", e.getMessage());
+            GazoFx.showError("スライドショー", e.getMessage());
             return;
         }
         if (layoutNames.isEmpty()) {
-            showWarn("スライドショー", "キャンバスがありません。");
+            GazoFx.showWarn("スライドショー", "キャンバスがありません。");
             return;
         }
         List<Path> selectionBackup = new ArrayList<>(canvasSelection);
@@ -487,7 +455,7 @@ public final class GazoApp extends Application {
         slideStage.initOwner(owner);
         slideStage.initModality(Modality.WINDOW_MODAL);
         slideStage.setTitle("スライドショー — キャンバス全体");
-        applyAppIcons(slideStage);
+        GazoFx.applyAppIcons(slideStage);
         BorderPane root = new BorderPane();
         root.setStyle("-fx-background-color: #1a1a1a;");
         VBox bottom = new VBox(6, counter, hint);
@@ -614,13 +582,13 @@ public final class GazoApp extends Application {
             refreshGallery();
             refreshVideoList();
         } catch (Exception e) {
-            showError("Vault 変更エラー", e.getMessage());
+            GazoFx.showError("Vault 変更エラー", e.getMessage());
         }
     }
 
     private void unlockOrCreate(Stage stage, GazoVaultService targetVault) throws IOException, MasterkeyLoadingFailedException {
         if (!targetVault.vaultExists()) {
-            char[] pass = promptPasswordTwice("新しい Vault を作成", "パスワードを設定してください");
+            char[] pass = GazoFx.promptPasswordTwice("新しい Vault を作成", "パスワードを設定してください");
             if (pass == null) {
                 throw new IllegalStateException("キャンセルされました");
             }
@@ -633,7 +601,7 @@ public final class GazoApp extends Application {
         }
 
         while (true) {
-            char[] pass = promptPassword("Vault のロックを解除", "パスワードを入力してください");
+            char[] pass = GazoFx.promptPassword("Vault のロックを解除", "パスワードを入力してください");
             if (pass == null) {
                 throw new IllegalStateException("キャンセルされました");
             }
@@ -643,58 +611,8 @@ public final class GazoApp extends Application {
                 return;
             } catch (InvalidPassphraseException e) {
                 Arrays.fill(pass, '\0');
-                showWarn("解除できません", "パスワードが正しくありません。");
+                GazoFx.showWarn("解除できません", "パスワードが正しくありません。");
             }
-        }
-    }
-
-    private Path appConfigDir() {
-        return Paths.get(System.getProperty("user.home"), APP_DIR_NAME);
-    }
-
-    private Path appConfigFile() {
-        return appConfigDir().resolve(CONFIG_FILE_NAME);
-    }
-
-    private Path defaultVaultPath() {
-        return appConfigDir().resolve(DEFAULT_VAULT_DIR_NAME);
-    }
-
-    private Path loadInitialVaultPath() {
-        Path defaultPath = defaultVaultPath();
-        Path file = appConfigFile();
-        if (!Files.exists(file)) {
-            return defaultPath;
-        }
-        Properties properties = new Properties();
-        try (InputStream in = Files.newInputStream(file)) {
-            properties.load(in);
-            String raw = properties.getProperty(CONFIG_KEY_LAST_VAULT_PATH, "").trim();
-            if (raw.isEmpty()) {
-                return defaultPath;
-            }
-            return Paths.get(raw);
-        } catch (Exception ignored) {
-            return defaultPath;
-        }
-    }
-
-    private void saveLastVaultPath(Path vaultPath) {
-        try {
-            Files.createDirectories(appConfigDir());
-            Path file = appConfigFile();
-            Properties properties = new Properties();
-            if (Files.exists(file)) {
-                try (InputStream in = Files.newInputStream(file)) {
-                    properties.load(in);
-                }
-            }
-            properties.setProperty(CONFIG_KEY_LAST_VAULT_PATH, vaultPath.toAbsolutePath().toString());
-            try (OutputStream out = Files.newOutputStream(file)) {
-                properties.store(out, "gazo settings");
-            }
-        } catch (IOException e) {
-            showWarn("設定保存エラー", "Vault パスの保存に失敗しました: " + e.getMessage());
         }
     }
 
@@ -710,7 +628,7 @@ public final class GazoApp extends Application {
             try {
                 vault.importImage(f.toPath());
             } catch (IOException e) {
-                showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
+                GazoFx.showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
             }
         }
         refreshGallery();
@@ -728,21 +646,21 @@ public final class GazoApp extends Application {
             try {
                 vault.importVideo(f.toPath());
             } catch (IOException e) {
-                showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
+                GazoFx.showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
             }
         }
         refreshTagFilterOptions();
         refreshVideoList();
     }
 
-    private void refreshGallery() {
+    void refreshGallery() {
         gallery.getChildren().clear();
         try {
             Map<String, Set<String>> tagMap = vault.tagsByFileName();
             List<Path> paths = listFilteredImages(tagMap);
             scheduleGalleryCards(paths, tagMap, 0, 28);
         } catch (IOException e) {
-            showError("読み込みエラー", e.getMessage());
+            GazoFx.showError("読み込みエラー", e.getMessage());
         }
     }
 
@@ -772,7 +690,7 @@ public final class GazoApp extends Application {
                 videoGallery.getChildren().add(createVideoCard(p));
             }
         } catch (IOException e) {
-            showError("動画一覧エラー", e.getMessage());
+            GazoFx.showError("動画一覧エラー", e.getMessage());
         }
     }
 
@@ -813,7 +731,7 @@ public final class GazoApp extends Application {
      */
     private void showVideoPlayer(Path vaultPath) {
         Stage playerStage = new Stage();
-        applyAppIcons(playerStage);
+        GazoFx.applyAppIcons(playerStage);
         playerStage.initOwner(primaryStage);
         Label status = new Label("動画を準備しています…");
         status.setPadding(new Insets(16));
@@ -844,7 +762,7 @@ public final class GazoApp extends Application {
                     javafx.scene.media.MediaException mex = media.getError();
                     String msg = mex != null && mex.getMessage() != null ? mex.getMessage() : "メディアを読み取れませんでした";
                     Platform.runLater(() -> {
-                        showError("再生エラー", msg);
+                        GazoFx.showError("再生エラー", msg);
                         playerStage.close();
                     });
                 });
@@ -870,7 +788,7 @@ public final class GazoApp extends Application {
                     String msg = mediaPlayer.getError() != null ? mediaPlayer.getError().getMessage() : "不明なエラー";
                     cleanup.run();
                     Platform.runLater(() -> {
-                        showError("再生エラー", msg);
+                        GazoFx.showError("再生エラー", msg);
                         playerStage.close();
                     });
                 });
@@ -881,14 +799,14 @@ public final class GazoApp extends Application {
                 } catch (IOException ignored) {
                     // ignore
                 }
-                showError("再生エラー", ex.getMessage());
+                GazoFx.showError("再生エラー", ex.getMessage());
                 playerStage.close();
             }
         });
         copyTask.setOnFailed(ev -> {
             Throwable ex = copyTask.getException();
             Platform.runLater(() -> {
-                showError("読み込みエラー", ex != null ? ex.getMessage() : "不明なエラー");
+                GazoFx.showError("読み込みエラー", ex != null ? ex.getMessage() : "不明なエラー");
                 playerStage.close();
             });
         });
@@ -941,11 +859,11 @@ public final class GazoApp extends Application {
         return listFilteredImages(vault.tagsByFileName());
     }
 
-    private List<Path> listFilteredImagesOrEmpty(String errorTitle) {
+    List<Path> listFilteredImagesOrEmpty(String errorTitle) {
         try {
             return listFilteredImages();
         } catch (IOException e) {
-            showError(errorTitle, e.getMessage());
+            GazoFx.showError(errorTitle, e.getMessage());
             return List.of();
         }
     }
@@ -967,7 +885,7 @@ public final class GazoApp extends Application {
                 tagFilterPane.getChildren().add(cb);
             }
         } catch (IOException e) {
-            showError("タグ読み込みエラー", e.getMessage());
+            GazoFx.showError("タグ読み込みエラー", e.getMessage());
         }
     }
 
@@ -1020,14 +938,14 @@ public final class GazoApp extends Application {
                     vault.importImage(path);
                     importedAny = true;
                 } catch (IOException e) {
-                    showError("保存エラー", file.getName() + " の保存に失敗しました: " + e.getMessage());
+                    GazoFx.showError("保存エラー", file.getName() + " の保存に失敗しました: " + e.getMessage());
                 }
             } else if (isVideoFile(path)) {
                 try {
                     vault.importVideo(path);
                     importedAny = true;
                 } catch (IOException e) {
-                    showError("保存エラー", file.getName() + " の保存に失敗しました: " + e.getMessage());
+                    GazoFx.showError("保存エラー", file.getName() + " の保存に失敗しました: " + e.getMessage());
                 }
             }
         }
@@ -1074,11 +992,11 @@ public final class GazoApp extends Application {
                         vault.setTags(importedPath, tags);
                     }
                 } catch (IOException e) {
-                    showError("保存エラー", file.getFileName() + " の保存に失敗しました: " + e.getMessage());
+                    GazoFx.showError("保存エラー", file.getFileName() + " の保存に失敗しました: " + e.getMessage());
                 }
             }
         } catch (IOException e) {
-            showError("フォルダー読み込みエラー", directory.getFileName() + " の読み込みに失敗しました: " + e.getMessage());
+            GazoFx.showError("フォルダー読み込みエラー", directory.getFileName() + " の読み込みに失敗しました: " + e.getMessage());
         }
         return importedAny;
     }
@@ -1230,7 +1148,7 @@ public final class GazoApp extends Application {
         try {
             current = String.join(", ", vault.getTags(imagePath));
         } catch (IOException e) {
-            showError("タグ読み込みエラー", e.getMessage());
+            GazoFx.showError("タグ読み込みエラー", e.getMessage());
             return;
         }
 
@@ -1249,13 +1167,13 @@ public final class GazoApp extends Application {
             refreshTagFilterOptions();
             refreshGallery();
         } catch (IOException e) {
-            showError("タグ保存エラー", e.getMessage());
+            GazoFx.showError("タグ保存エラー", e.getMessage());
         }
     }
 
     private void addTagsToCanvasSelection() {
         if (listCheckedSelection.isEmpty()) {
-            showWarn("タグ一括追加", "先に画像をチェックしてください。");
+            GazoFx.showWarn("タグ一括追加", "先に画像をチェックしてください。");
             return;
         }
         TextInputDialog dialog = new TextInputDialog();
@@ -1278,15 +1196,15 @@ public final class GazoApp extends Application {
             }
             refreshTagFilterOptions();
             refreshGallery();
-            showWarn("タグ一括追加", addTags.size() + " 個のタグを追加しました。");
+            GazoFx.showWarn("タグ一括追加", addTags.size() + " 個のタグを追加しました。");
         } catch (IOException e) {
-            showError("タグ一括追加エラー", e.getMessage());
+            GazoFx.showError("タグ一括追加エラー", e.getMessage());
         }
     }
 
     private void removeTagsFromCanvasSelection() {
         if (listCheckedSelection.isEmpty()) {
-            showWarn("タグ一括削除", "先に画像をチェックしてください。");
+            GazoFx.showWarn("タグ一括削除", "先に画像をチェックしてください。");
             return;
         }
         TextInputDialog dialog = new TextInputDialog();
@@ -1309,9 +1227,9 @@ public final class GazoApp extends Application {
             }
             refreshTagFilterOptions();
             refreshGallery();
-            showWarn("タグ一括削除", removeTags.size() + " 個のタグを削除しました。");
+            GazoFx.showWarn("タグ一括削除", removeTags.size() + " 個のタグを削除しました。");
         } catch (IOException e) {
-            showError("タグ一括削除エラー", e.getMessage());
+            GazoFx.showError("タグ一括削除エラー", e.getMessage());
         }
     }
 
@@ -1335,85 +1253,13 @@ public final class GazoApp extends Application {
             listCheckedSelection.addAll(listFilteredImages());
             refreshGallerySelectionStyles();
         } catch (IOException e) {
-            showError("全選択エラー", e.getMessage());
+            GazoFx.showError("全選択エラー", e.getMessage());
         }
     }
 
     private void clearListCheckedSelection() {
         listCheckedSelection.clear();
         refreshGallerySelectionStyles();
-    }
-
-    private char[] promptPassword(String title, String message) {
-        Dialog<char[]> dialog = new Dialog<>();
-        dialog.setTitle(title);
-        ButtonType okType = new ButtonType("OK", ButtonBar.ButtonData.OK_DONE);
-        dialog.getDialogPane().getButtonTypes().addAll(okType, ButtonType.CANCEL);
-
-        Label label = new Label(message);
-        PasswordField pass = new PasswordField();
-        VBox box = new VBox(8, label, pass);
-        box.setPadding(new Insets(10));
-        VBox.setVgrow(pass, Priority.NEVER);
-        dialog.getDialogPane().setContent(box);
-
-        bindAppIconToDialog(dialog);
-        dialog.setResultConverter(bt -> bt == okType ? pass.getText().toCharArray() : null);
-        Optional<char[]> result = dialog.showAndWait();
-        return result.orElse(null);
-    }
-
-    private char[] promptPasswordTwice(String title, String message) {
-        while (true) {
-            Dialog<List<char[]>> dialog = new Dialog<>();
-            dialog.setTitle(title);
-            ButtonType okType = new ButtonType("OK", ButtonBar.ButtonData.OK_DONE);
-            dialog.getDialogPane().getButtonTypes().addAll(okType, ButtonType.CANCEL);
-
-            PasswordField p1 = new PasswordField();
-            PasswordField p2 = new PasswordField();
-            VBox box = new VBox(8,
-                    new Label(message),
-                    new Label("パスワード"), p1,
-                    new Label("確認"), p2);
-            box.setPadding(new Insets(10));
-            dialog.getDialogPane().setContent(box);
-            bindAppIconToDialog(dialog);
-            dialog.setResultConverter(bt -> bt == okType ? new ArrayList<>(List.of(p1.getText().toCharArray(), p2.getText().toCharArray())) : null);
-
-            Optional<List<char[]>> result = dialog.showAndWait();
-            if (result.isEmpty()) {
-                return null;
-            }
-            char[] a = result.get().get(0);
-            char[] b = result.get().get(1);
-            if (a.length == 0) {
-                showWarn(title, "パスワードを入力してください。");
-                continue;
-            }
-            if (!Arrays.equals(a, b)) {
-                showWarn(title, "確認用パスワードが一致しません。");
-                Arrays.fill(a, '\0');
-                Arrays.fill(b, '\0');
-                continue;
-            }
-            Arrays.fill(b, '\0');
-            return a;
-        }
-    }
-
-    private void showWarn(String title, String message) {
-        Alert alert = new Alert(Alert.AlertType.WARNING, message, ButtonType.OK);
-        alert.setTitle(title);
-        alert.setHeaderText(null);
-        alert.showAndWait();
-    }
-
-    private void showError(String title, String message) {
-        Alert alert = new Alert(Alert.AlertType.ERROR, message, ButtonType.OK);
-        alert.setTitle(title);
-        alert.setHeaderText(null);
-        alert.showAndWait();
     }
 
     private void showDuplicateReport() {
@@ -1498,7 +1344,7 @@ public final class GazoApp extends Application {
                 selectedPairIndexRef.set(0);
                 updateDuplicatePreview(selected, selectedPairOptionsRef.get(), selectedPairIndexRef.get(), leftPreview, rightPreview, leftLabel, rightLabel);
             } catch (IOException e) {
-                showError("重複チェックエラー", e.getMessage());
+                GazoFx.showError("重複チェックエラー", e.getMessage());
             }
         };
 
@@ -1621,7 +1467,7 @@ public final class GazoApp extends Application {
     private void showOriginalImageViewer(Path startPath, List<Path> sourceImages) {
         final List<Path> images = new ArrayList<>(sourceImages);
         if (images.isEmpty()) {
-            showWarn("画像ビューア", "表示できる画像がありません。");
+            GazoFx.showWarn("画像ビューア", "表示できる画像がありません。");
             return;
         }
         int startIndex = images.indexOf(startPath);
@@ -1788,7 +1634,7 @@ public final class GazoApp extends Application {
 
     private void showLargeCompareDialog(Path selected, List<GazoVaultService.SimilarPair> selectedPairs, int selectedPairIndex) {
         if (selected == null || selectedPairs == null || selectedPairs.isEmpty()) {
-            showWarn("比較表示", "比較できる候補がありません。");
+            GazoFx.showWarn("比較表示", "比較できる候補がありません。");
             return;
         }
         int idx = Math.max(0, Math.min(selectedPairIndex, selectedPairs.size() - 1));
@@ -1818,7 +1664,7 @@ public final class GazoApp extends Application {
 
     private void deleteDuplicateSelection(Path selected, Runnable refresh) {
         if (selected == null) {
-            showWarn("削除", "候補画像を選択してください。");
+            GazoFx.showWarn("削除", "候補画像を選択してください。");
             return;
         }
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, selected.getFileName() + " を削除しますか？", ButtonType.OK, ButtonType.CANCEL);
@@ -1833,13 +1679,13 @@ public final class GazoApp extends Application {
             refreshGallery();
             refresh.run();
         } catch (IOException e) {
-            showError("削除エラー", e.getMessage());
+            GazoFx.showError("削除エラー", e.getMessage());
         }
     }
 
     private void addTagToDuplicateSelection(Path selected, Runnable refresh) {
         if (selected == null) {
-            showWarn("タグ付与", "候補画像を選択してください。");
+            GazoFx.showWarn("タグ付与", "候補画像を選択してください。");
             return;
         }
         TextInputDialog dialog = new TextInputDialog();
@@ -1862,643 +1708,18 @@ public final class GazoApp extends Application {
             refreshGallery();
             refresh.run();
         } catch (IOException e) {
-            showError("タグ付与エラー", e.getMessage());
+            GazoFx.showError("タグ付与エラー", e.getMessage());
         }
     }
 
     /**
-     * キャンバス機能の統合 UI: 画像選択・ランダムピック・Vault への保存・スライドショー。
+     * キャンバス機能の統合 UI は {@link CanvasHubDialog} を参照。
      */
     private void showCanvasHubDialog(Stage owner) {
-        if (!listCheckedSelection.isEmpty()) {
-            canvasSelection.clear();
-            canvasSelection.addAll(listCheckedSelection);
-        }
-        Dialog<Void> dialog = new Dialog<>();
-        dialog.initOwner(owner);
-        dialog.setTitle("キャンバス");
-        dialog.setResizable(true);
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
-
-        AtomicReference<String> currentLayout = new AtomicReference<>("default");
-
-        Button overwriteSaveButton = new Button("上書き保存");
-        overwriteSaveButton.setOnAction(e -> persistCanvasSelectionToVaultWithFeedback(currentLayout.get()));
-
-        Button slideshowButton = new Button("スライドショー");
-        slideshowButton.setOnAction(e -> showSlideshow(owner));
-
-        Label hubHint = new Label(
-                "ギャラリーで「キャンバス対象」をチェックするか、「ランダムピック」タブで「名前を付けて保存…」からキャンバスに取り込みます。"
-                        + "「キャンバス編集」タブのツールバーから「上書き保存」で、現在のキャンバスの画像一覧を Vault に記録します。"
-                        + "キャンバス名タブを切り替えると、切り替え前のキャンバスの一覧は自動で保存されます。"
-                        + "ダイアログを閉じるだけでは、最後に表示していたキャンバスの一覧は保存されないので、閉じる前に「上書き保存」してください。"
-                        + "「名前を付けて保存…」は現在の内容を保存したうえで別名のキャンバスを複製します。"
-                        + "キャンバス編集で位置・回転を調整し、スライドショーで全体を表示できます。");
-        hubHint.setWrapText(true);
-        hubHint.setMaxWidth(1000);
-        hubHint.setStyle("-fx-text-fill: #555;");
-
-        HBox topBar = new HBox(12, slideshowButton);
-        topBar.setAlignment(Pos.CENTER_LEFT);
-
-        AtomicReference<Runnable> refreshEditor = new AtomicReference<>(() -> {});
-        AtomicReference<TabPane> tabsRef = new AtomicReference<>();
-        ListView<String> canvasListView = new ListView<>();
-        AtomicReference<Runnable> refreshCanvasList = new AtomicReference<>(() -> {});
-        AtomicReference<Path> selectedCanvasImage = new AtomicReference<>(null);
-
-        Tab editTab = new Tab("キャンバス編集");
-        editTab.setClosable(false);
-
-        Pane editCanvas = new Pane();
-        editCanvas.setPrefSize(1100, 760);
-        editCanvas.setStyle("-fx-background-color: linear-gradient(to bottom, #f0ede4, #e4dccb);");
-        TabPane layoutTabs = new TabPane();
-        layoutTabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-        ComboBox<String> presetCombo = new ComboBox<>();
-        Slider overlapSlider = new Slider(0, 100, 50);
-        Slider neatSlider = new Slider(0, 100, 50);
-        Button newLayoutButton = new Button("名前を付けて保存…");
-        Button autoLayoutButton = new Button("自動レイアウト");
-
-        try {
-            for (String name : vault.listCanvasLayouts()) {
-                Tab t = new Tab(name);
-                t.setClosable(false);
-                layoutTabs.getTabs().add(t);
-            }
-        } catch (IOException e) {
-            showError("キャンバス読込エラー", e.getMessage());
-        }
-        if (layoutTabs.getTabs().stream().noneMatch(t -> "default".equals(t.getText()))) {
-            Tab t = new Tab("default");
-            t.setClosable(false);
-            layoutTabs.getTabs().add(t);
-        }
-        Tab initialTab = layoutTabs.getTabs().stream()
-                .filter(t -> "default".equals(t.getText()))
-                .findFirst()
-                .orElse(layoutTabs.getTabs().isEmpty() ? null : layoutTabs.getTabs().get(0));
-        if (initialTab != null) {
-            layoutTabs.getSelectionModel().select(initialTab);
-        }
-        Label layoutNameLabel = new Label();
-        layoutNameLabel.setStyle("-fx-font-size: 14px; -fx-font-weight: bold; -fx-text-fill: #3a3833;");
-        Runnable updateLayoutNameLabel = () -> layoutNameLabel.setText("キャンバス名「" + currentLayout.get() + "」");
-        presetCombo.getItems().setAll(LAYOUT_PRESETS);
-        presetCombo.setValue("コラージュ風");
-        overlapSlider.setPrefWidth(120);
-        neatSlider.setPrefWidth(120);
-        overlapSlider.setShowTickLabels(false);
-        neatSlider.setShowTickLabels(false);
-        overlapSlider.setShowTickMarks(false);
-        neatSlider.setShowTickMarks(false);
-        presetCombo.setOnAction(e -> {
-            boolean neatPreset = "整列風".equals(presetCombo.getValue());
-            overlapSlider.setValue(neatPreset ? 80 : 40);
-            neatSlider.setValue(neatPreset ? 80 : 35);
-        });
-        presetCombo.getOnAction().handle(null);
-
-        Runnable saveCanvasSize = () -> {
-            try {
-                vault.setCanvasSize(currentLayout.get(), editCanvas.getPrefWidth(), editCanvas.getPrefHeight());
-            } catch (IOException ex) {
-                showWarn("キャンバスサイズ保存エラー", ex.getMessage());
-            }
-        };
-        Runnable applyCanvasSize = () -> {
-            try {
-                var size = vault.getCanvasSize(currentLayout.get());
-                if (size != null) {
-                    editCanvas.setPrefSize(Math.max(900, size.width()), Math.max(700, size.height()));
-                } else {
-                    editCanvas.setPrefSize(2000, 1400);
-                }
-            } catch (IOException ex) {
-                showWarn("キャンバスサイズ読込エラー", ex.getMessage());
-            }
-        };
-
-        final Scale editHolderScale = new Scale(1, 1, 0, 0);
-        Group editCanvasHolder = new Group(editCanvas);
-        editCanvasHolder.getTransforms().add(editHolderScale);
-        editCanvasHolder.setManaged(false);
-        Pane editViewportPane = new Pane();
-        editViewportPane.getChildren().add(editCanvasHolder);
-        ScrollPane editScroll = new ScrollPane(editViewportPane);
-        editScroll.setFitToWidth(true);
-        editScroll.setFitToHeight(true);
-        editScroll.setPrefViewportWidth(1100);
-        editScroll.setPrefViewportHeight(760);
-        Runnable updateEditCanvasFit = () -> {
-            Bounds vb = editScroll.getViewportBounds();
-            double vw = vb.getWidth();
-            double vh = vb.getHeight();
-            if (vw <= 0 || vh <= 0) {
-                return;
-            }
-            double cw = editCanvas.getPrefWidth();
-            double ch = editCanvas.getPrefHeight();
-            if (cw <= 0 || ch <= 0) {
-                return;
-            }
-            double margin = 16;
-            double s = Math.min((vw - margin) / cw, (vh - margin) / ch);
-            if (Double.isNaN(s) || s <= 0) {
-                s = 1.0;
-            }
-            if (s > 1.0) {
-                s = 1.0;
-            }
-            editHolderScale.setX(s);
-            editHolderScale.setY(s);
-            double scaledW = cw * s;
-            double scaledH = ch * s;
-            editCanvasHolder.setLayoutX((vw - scaledW) / 2.0);
-            editCanvasHolder.setLayoutY((vh - scaledH) / 2.0);
-        };
-        editScroll.viewportBoundsProperty().addListener((obs, oldB, newB) -> {
-            if (newB == null) {
-                return;
-            }
-            Platform.runLater(updateEditCanvasFit);
-        });
-
-        Runnable render = () -> {
-            renderCanvasItems(
-                    editCanvas,
-                    currentLayout.get(),
-                    true,
-                    selectedCanvasImage.get(),
-                    path -> {
-                        selectedCanvasImage.set(path);
-                        refreshEditor.get().run();
-                    },
-                    path -> {
-                        if (path == null || !canvasSelection.contains(path)) {
-                            return;
-                        }
-                        canvasSelection.remove(path);
-                        selectedCanvasImage.set(null);
-                        try {
-                            vault.saveCanvasSelectionOrder(currentLayout.get(), new ArrayList<>(canvasSelection));
-                        } catch (IOException ex) {
-                            showWarn("除去", "画像一覧の保存に失敗しました: " + ex.getMessage());
-                        }
-                        refreshGallery();
-                        refreshEditor.get().run();
-                    });
-            Platform.runLater(updateEditCanvasFit);
-        };
-        refreshEditor.set(render);
-
-        Runnable onEditResizeFinished = () -> {
-            saveCanvasSize.run();
-            Platform.runLater(updateEditCanvasFit);
-        };
-        installCanvasResizeHandle(editCanvas, onEditResizeFinished);
-
-        layoutTabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
-            if (oldTab != null) {
-                persistCanvasSelectionToVault(oldTab.getText());
-            }
-            String selected = newTab == null ? "default" : newTab.getText();
-            currentLayout.set(selected == null ? "default" : selected);
-            reloadCanvasSelectionFromVault(currentLayout.get());
-            selectedCanvasImage.set(null);
-            applyCanvasSize.run();
-            render.run();
-            updateLayoutNameLabel.run();
-        });
-        newLayoutButton.setOnAction(e -> {
-            persistCanvasSelectionToVault(currentLayout.get());
-            TextInputDialog input = new TextInputDialog();
-            input.setTitle("名前を付けて保存");
-            input.setHeaderText("現在のキャンバスの内容を保存したうえで、別名のキャンバスとして複製します。");
-            input.setContentText("保存名（キャンバス名）:");
-            Optional<String> name = input.showAndWait();
-            if (name.isEmpty()) {
-                return;
-            }
-            String layout = name.get().trim();
-            if (layout.isEmpty()) {
-                return;
-            }
-            boolean exists = layoutTabs.getTabs().stream().anyMatch(t -> layout.equals(t.getText()));
-            if (!exists) {
-                String sourceLayout = currentLayout.get();
-                try {
-                    copyCanvasLayoutState(sourceLayout, layout);
-                } catch (IOException ex) {
-                    showError("名前を付けて保存エラー", ex.getMessage());
-                    return;
-                }
-                Tab tab = new Tab(layout);
-                tab.setClosable(false);
-                layoutTabs.getTabs().add(tab);
-                refreshCanvasList.get().run();
-                showWarn("名前を付けて保存", "「" + layout + "」として保存しました（「" + sourceLayout + "」の内容を複製）。");
-            }
-            layoutTabs.getTabs().stream()
-                    .filter(t -> layout.equals(t.getText()))
-                    .findFirst()
-                    .ifPresent(t -> layoutTabs.getSelectionModel().select(t));
-        });
-        Runnable deleteActiveLayout = () -> {
-            Tab selectedTab = layoutTabs.getSelectionModel().getSelectedItem();
-            String selected = selectedTab == null ? null : selectedTab.getText();
-            if (selected == null || "default".equals(selected)) {
-                showWarn("削除不可", "default キャンバスは削除できません。");
-                return;
-            }
-            try {
-                vault.deleteCanvasLayout(selected);
-                layoutTabs.getTabs().removeIf(t -> selected.equals(t.getText()));
-                refreshCanvasList.get().run();
-                layoutTabs.getTabs().stream()
-                        .filter(t -> "default".equals(t.getText()))
-                        .findFirst()
-                        .ifPresent(t -> layoutTabs.getSelectionModel().select(t));
-                reloadCanvasSelectionFromVault("default");
-            } catch (IOException ex) {
-                showError("キャンバス削除エラー", ex.getMessage());
-            }
-        };
-        autoLayoutButton.setOnAction(e -> {
-            autoLayoutCanvas(
-                    editCanvas,
-                    currentLayout.get(),
-                    presetCombo.getValue(),
-                    overlapSlider.getValue() / 100.0,
-                    neatSlider.getValue() / 100.0);
-            render.run();
-        });
-
-        HBox editToolBarPrimary = new HBox(12, layoutNameLabel, overwriteSaveButton, newLayoutButton);
-        editToolBarPrimary.setPadding(new Insets(8, 12, 8, 12));
-        editToolBarPrimary.setAlignment(Pos.CENTER_LEFT);
-        editToolBarPrimary.setStyle(
-                "-fx-background-color: linear-gradient(to bottom, #faf8f3, #f2efe7);"
-                        + "-fx-border-color: #d7d0c2; -fx-border-width: 0 0 1 0;");
-
-        HBox editToolBarControls = new HBox(
-                8,
-                new Label("プリセット:"),
-                presetCombo,
-                new Label("重なり回避"),
-                overlapSlider,
-                new Label("整列感"),
-                neatSlider,
-                autoLayoutButton);
-        editToolBarControls.setPadding(new Insets(6, 12, 8, 12));
-        editToolBarControls.setAlignment(Pos.CENTER_LEFT);
-        editToolBarControls.setStyle(
-                "-fx-background-color: rgba(255,255,255,0.65); -fx-border-color: #e7e2d8; -fx-border-width: 0 0 1 0;");
-
-        VBox editorVBox = new VBox(8, layoutTabs, editToolBarPrimary, editToolBarControls, editScroll);
-        VBox.setVgrow(editScroll, Priority.ALWAYS);
-        editTab.setContent(editorVBox);
-        updateLayoutNameLabel.run();
-
-        Tab randomTab = new Tab("ランダムピック");
-        randomTab.setClosable(false);
-
-        final List<Path> pool = listFilteredImagesOrEmpty("キャンバス");
-
-        Node randomNode;
-        Runnable randomBootstrap = () -> {
-        };
-
-        if (pool.isEmpty()) {
-            randomNode = new Label("タグ／フィルターに一致する画像がありません。条件を変えてください。");
-        } else {
-            Pane randomCanvas = new Pane();
-            randomCanvas.setStyle("-fx-background-color: linear-gradient(to bottom, #f0ede4, #e4dccb);");
-            randomCanvas.setPrefSize(1000, 700);
-
-            TextField countField = new TextField("6");
-            countField.setPrefWidth(56);
-            Button prevButton = new Button("前のランダムピック");
-            Button nextButton = new Button("次のランダムピック");
-            Button createLayoutButton = new Button("名前を付けて保存…");
-            Label pageLabel = new Label();
-
-            List<List<Path>> history = new ArrayList<>();
-            AtomicInteger index = new AtomicInteger(-1);
-
-            Runnable renderCurrent = () -> {
-                int i = index.get();
-                if (i < 0 || i >= history.size()) {
-                    randomCanvas.getChildren().clear();
-                    pageLabel.setText("0/0");
-                    return;
-                }
-                List<Path> current = history.get(i);
-                pageLabel.setText((i + 1) + "/" + history.size());
-                renderRandomPickCanvas(randomCanvas, current);
-            };
-
-            Runnable nextPick = () -> {
-                int cur = index.get();
-                if (cur + 1 < history.size()) {
-                    index.incrementAndGet();
-                    renderCurrent.run();
-                    return;
-                }
-                int count = parsePickCount(countField.getText(), pool.size());
-                List<Path> pick = makeRandomPick(pool, count);
-                history.add(pick);
-                index.set(history.size() - 1);
-                renderCurrent.run();
-            };
-
-            prevButton.setOnAction(e -> {
-                if (index.get() > 0) {
-                    index.decrementAndGet();
-                    renderCurrent.run();
-                }
-            });
-            nextButton.setOnAction(e -> nextPick.run());
-            createLayoutButton.setOnAction(e -> {
-                int i = index.get();
-                if (i < 0 || i >= history.size()) {
-                    return;
-                }
-                List<Path> pick = history.get(i);
-                TextInputDialog layoutDialog = new TextInputDialog("random-" + LocalDate.now().format(DateTimeFormatter.ofPattern("MMdd")));
-                layoutDialog.setTitle("名前を付けて保存");
-                layoutDialog.setHeaderText("現在のランダムピックをキャンバスに載せ、別名のキャンバスとして保存します。");
-                layoutDialog.setContentText("保存名（キャンバス名）:");
-                Optional<String> layoutResult = layoutDialog.showAndWait();
-                if (layoutResult.isEmpty()) {
-                    return;
-                }
-                String newLayout = layoutResult.get().trim();
-                if (newLayout.isEmpty()) {
-                    return;
-                }
-                canvasSelection.clear();
-                canvasSelection.addAll(pick);
-                try {
-                    vault.saveCanvasSelectionOrder(newLayout, new ArrayList<>(canvasSelection));
-                } catch (IOException ex) {
-                    showError("名前を付けて保存エラー", ex.getMessage());
-                    return;
-                }
-                boolean exists = layoutTabs.getTabs().stream().anyMatch(t -> newLayout.equals(t.getText()));
-                if (!exists) {
-                    Tab tab = new Tab(newLayout);
-                    tab.setClosable(false);
-                    layoutTabs.getTabs().add(tab);
-                    refreshCanvasList.get().run();
-                }
-                layoutTabs.getTabs().stream()
-                        .filter(t -> newLayout.equals(t.getText()))
-                        .findFirst()
-                        .ifPresent(t -> layoutTabs.getSelectionModel().select(t));
-                autoLayoutCanvas(
-                        editCanvas,
-                        newLayout,
-                        presetCombo.getValue(),
-                        overlapSlider.getValue() / 100.0,
-                        neatSlider.getValue() / 100.0);
-                refreshGallery();
-                refreshEditor.get().run();
-                TabPane tp = tabsRef.get();
-                if (tp != null) {
-                    tp.getSelectionModel().select(editTab);
-                }
-                showWarn("名前を付けて保存", "「" + newLayout + "」として保存しました（ランダムピックをキャンバスに反映）。");
-            });
-
-            ScrollPane randomScroll = new ScrollPane(randomCanvas);
-            randomScroll.setFitToWidth(true);
-            randomScroll.setFitToHeight(true);
-            randomScroll.viewportBoundsProperty().addListener((obs, oldB, newB) -> {
-                if (newB == null) {
-                    return;
-                }
-                double vw = Math.max(300, newB.getWidth());
-                double vh = Math.max(220, newB.getHeight());
-                double baseW = 1000;
-                double baseH = 700;
-                randomCanvas.setPrefSize(Math.max(baseW, vw), Math.max(baseH, vh));
-                renderCurrent.run();
-            });
-            HBox controls = new HBox(8, new Label("枚数"), countField, prevButton, nextButton, createLayoutButton, new Label("履歴"), pageLabel);
-            controls.setAlignment(Pos.CENTER_LEFT);
-            VBox randomVBox = new VBox(8, controls, randomScroll);
-            VBox.setVgrow(randomScroll, Priority.ALWAYS);
-            randomVBox.setPadding(new Insets(4));
-            randomNode = randomVBox;
-            randomBootstrap = nextPick;
-        }
-
-        randomTab.setContent(randomNode);
-
-        Tab listTab = new Tab("キャンバス一覧");
-        listTab.setClosable(false);
-        Pane previewCanvas = new Pane();
-        previewCanvas.setPrefSize(760, 460);
-        previewCanvas.setStyle("-fx-background-color: linear-gradient(to bottom, #f0ede4, #e4dccb);");
-        ScrollPane previewScroll = new ScrollPane(previewCanvas);
-        previewScroll.setFitToWidth(true);
-        previewScroll.setFitToHeight(true);
-        previewScroll.setMinWidth(200);
-        previewScroll.setMinHeight(160);
-        Runnable renderCanvasPreview = () -> {
-            String selectedName = canvasListView.getSelectionModel().getSelectedItem();
-            if (selectedName == null || selectedName.isBlank()) {
-                previewCanvas.getChildren().clear();
-                return;
-            }
-            List<Path> backup = new ArrayList<>(canvasSelection);
-            try {
-                List<Path> selectedPaths = vault.listCanvasSelectionOrder(selectedName);
-                canvasSelection.clear();
-                canvasSelection.addAll(selectedPaths);
-                var size = vault.getCanvasSize(selectedName);
-                if (size != null) {
-                    previewCanvas.setPrefSize(Math.max(400, size.width()), Math.max(260, size.height()));
-                } else {
-                    previewCanvas.setPrefSize(1200, 840);
-                }
-                renderCanvasItems(previewCanvas, selectedName, false, null, null, null);
-            } catch (IOException ex) {
-                previewCanvas.getChildren().clear();
-            } finally {
-                canvasSelection.clear();
-                canvasSelection.addAll(backup);
-            }
-        };
-        Runnable openListSelectionInEditor = () -> {
-            String selectedName = canvasListView.getSelectionModel().getSelectedItem();
-            if (selectedName == null || selectedName.isBlank()) {
-                return;
-            }
-            layoutTabs.getTabs().stream()
-                    .filter(t -> selectedName.equals(t.getText()))
-                    .findFirst()
-                    .ifPresent(t -> {
-                        layoutTabs.getSelectionModel().select(t);
-                        TabPane tp = tabsRef.get();
-                        if (tp != null) {
-                            tp.getSelectionModel().select(editTab);
-                        }
-                    });
-        };
-        SplitPane listSplit = new SplitPane();
-        listSplit.setOrientation(Orientation.HORIZONTAL);
-        ComboBox<String> previewPositionCombo = new ComboBox<>();
-        previewPositionCombo.getItems().addAll("プレビュー: 右", "プレビュー: 下");
-        previewPositionCombo.setValue("プレビュー: 右");
-        previewPositionCombo.setOnAction(e -> {
-            int i = previewPositionCombo.getSelectionModel().getSelectedIndex();
-            listSplit.setOrientation(i == 0 ? Orientation.HORIZONTAL : Orientation.VERTICAL);
-            Platform.runLater(() -> listSplit.setDividerPositions(0.38));
-        });
-        HBox listControls = new HBox(12, new Label("表示:"), previewPositionCombo);
-        listControls.setAlignment(Pos.CENTER_LEFT);
-        canvasListView.setCellFactory(lv -> new ListCell<String>() {
-            private final Label nameLabel = new Label();
-            private final Button editBtn = new Button();
-            private final Button delBtn = new Button();
-            private final HBox actions = new HBox(2);
-            private final HBox row = new HBox(8);
-
-            {
-                nameLabel.setMaxWidth(Double.MAX_VALUE);
-                HBox.setHgrow(nameLabel, Priority.ALWAYS);
-                Text editGlyph = new Text("✎");
-                editGlyph.setStyle("-fx-font-size: 13px;");
-                Text delGlyph = new Text("🗑");
-                delGlyph.setStyle("-fx-font-size: 12px;");
-                editBtn.setGraphic(editGlyph);
-                editBtn.setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
-                delBtn.setGraphic(delGlyph);
-                delBtn.setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
-                editBtn.setFocusTraversable(false);
-                delBtn.setFocusTraversable(false);
-                editBtn.setStyle("-fx-background-color: transparent; -fx-padding: 2 6;");
-                delBtn.setStyle("-fx-background-color: transparent; -fx-padding: 2 6;");
-                Tooltip.install(editBtn, new Tooltip("キャンバス編集で開く"));
-                Tooltip.install(delBtn, new Tooltip("キャンバスを削除"));
-                editBtn.setOnAction(ev -> {
-                    String name = getItem();
-                    if (name == null) {
-                        return;
-                    }
-                    getListView().getSelectionModel().select(name);
-                    openListSelectionInEditor.run();
-                });
-                delBtn.setOnAction(ev -> {
-                    String name = getItem();
-                    if (name == null) {
-                        return;
-                    }
-                    getListView().getSelectionModel().select(name);
-                    layoutTabs.getTabs().stream()
-                            .filter(t -> name.equals(t.getText()))
-                            .findFirst()
-                            .ifPresent(t -> layoutTabs.getSelectionModel().select(t));
-                    deleteActiveLayout.run();
-                });
-                actions.getChildren().addAll(editBtn, delBtn);
-                actions.setAlignment(Pos.CENTER_RIGHT);
-                actions.setVisible(false);
-                actions.setManaged(false);
-                row.getChildren().addAll(nameLabel, actions);
-                row.setAlignment(Pos.CENTER_LEFT);
-                row.setPadding(new Insets(0, 4, 0, 0));
-            }
-
-            @Override
-            protected void updateItem(String item, boolean empty) {
-                super.updateItem(item, empty);
-                if (empty || item == null) {
-                    setGraphic(null);
-                    setText(null);
-                } else {
-                    nameLabel.setText(item);
-                    setGraphic(row);
-                    setText(null);
-                    boolean sel = isSelected();
-                    actions.setVisible(sel);
-                    actions.setManaged(sel);
-                }
-            }
-
-            @Override
-            public void updateSelected(boolean selected) {
-                super.updateSelected(selected);
-                if (!isEmpty()) {
-                    actions.setVisible(selected);
-                    actions.setManaged(selected);
-                }
-            }
-        });
-        canvasListView.getSelectionModel().selectedItemProperty().addListener((obs, o, n) -> renderCanvasPreview.run());
-        canvasListView.setOnMouseClicked(e -> {
-            if (e.getButton() == MouseButton.PRIMARY && e.getClickCount() == 2) {
-                openListSelectionInEditor.run();
-            }
-        });
-        VBox listPane = new VBox(8, listControls, canvasListView);
-        VBox.setVgrow(canvasListView, Priority.ALWAYS);
-        listPane.setMinWidth(120);
-        listSplit.getItems().addAll(listPane, previewScroll);
-        listSplit.setDividerPositions(0.38);
-        VBox listContent = new VBox(listSplit);
-        VBox.setVgrow(listSplit, Priority.ALWAYS);
-        listContent.setPadding(new Insets(4));
-        listTab.setContent(listContent);
-
-        refreshCanvasList.set(() -> {
-            String current = canvasListView.getSelectionModel().getSelectedItem();
-            List<String> names = layoutTabs.getTabs().stream().map(Tab::getText).toList();
-            canvasListView.getItems().setAll(names);
-            if (current != null && names.contains(current)) {
-                canvasListView.getSelectionModel().select(current);
-            } else if (!names.isEmpty()) {
-                canvasListView.getSelectionModel().select(names.get(0));
-            }
-            renderCanvasPreview.run();
-        });
-        refreshCanvasList.get().run();
-
-        TabPane tabPane = new TabPane(editTab, randomTab, listTab);
-        tabPane.setMinHeight(420);
-        tabsRef.set(tabPane);
-
-        tabPane.getSelectionModel().selectedItemProperty().addListener((obs, o, n) -> {
-            if (n == editTab) {
-                refreshEditor.get().run();
-            }
-        });
-
-        VBox root = new VBox(8, topBar, hubHint, tabPane);
-        VBox.setVgrow(tabPane, Priority.ALWAYS);
-        root.setPadding(new Insets(8));
-        dialog.getDialogPane().setContent(root);
-        dialog.getDialogPane().setPrefSize(1180, 820);
-
-        applyCanvasSize.run();
-        render.run();
-        randomBootstrap.run();
-
-        dialog.setOnShown(e -> {
-            Scene ds = dialog.getDialogPane().getScene();
-            if (ds != null && ds.getWindow() instanceof Stage) {
-                applyAppIcons((Stage) ds.getWindow());
-            }
-            Platform.runLater(updateEditCanvasFit);
-        });
-        dialog.showAndWait();
+        CanvasHubDialog.open(this, owner);
     }
 
-    private int parsePickCount(String text, int max) {
+    int parsePickCount(String text, int max) {
         try {
             int n = Integer.parseInt(text.trim());
             return Math.max(1, Math.min(max, n));
@@ -2507,13 +1728,13 @@ public final class GazoApp extends Application {
         }
     }
 
-    private List<Path> makeRandomPick(List<Path> pool, int count) {
+    List<Path> makeRandomPick(List<Path> pool, int count) {
         List<Path> copy = new ArrayList<>(pool);
         Collections.shuffle(copy, new Random());
         return new ArrayList<>(copy.subList(0, Math.min(count, copy.size())));
     }
 
-    private void renderRandomPickCanvas(Pane canvas, List<Path> paths) {
+    void renderRandomPickCanvas(Pane canvas, List<Path> paths) {
         canvas.getChildren().clear();
         double frameW = canvas.getPrefWidth();
         double frameH = canvas.getPrefHeight();
@@ -2540,7 +1761,7 @@ public final class GazoApp extends Application {
         }
     }
 
-    private void installCanvasResizeHandle(Pane canvas, Runnable onResizeFinished) {
+    void installCanvasResizeHandle(Pane canvas, Runnable onResizeFinished) {
         Region handle = new Region();
         handle.setPrefSize(16, 16);
         handle.setStyle("-fx-background-color: rgba(80,80,80,0.65); -fx-background-radius: 2;");
@@ -2583,7 +1804,7 @@ public final class GazoApp extends Application {
     /**
      * 現在のキャンバスの配置・変形・キャンバスサイズを新規キャンバスへ複製する。
      */
-    private void copyCanvasLayoutState(String sourceLayout, String targetLayout) throws IOException {
+    void copyCanvasLayoutState(String sourceLayout, String targetLayout) throws IOException {
         String source = (sourceLayout == null || sourceLayout.isBlank()) ? "default" : sourceLayout;
         String target = (targetLayout == null || targetLayout.isBlank()) ? "default" : targetLayout;
         if (source.equals(target)) {
@@ -2678,11 +1899,11 @@ public final class GazoApp extends Application {
             }
             Platform.runLater(this::fitHomeCanvasPreview);
         } catch (IOException e) {
-            showError("キャンバス表示", e.getMessage());
+            GazoFx.showError("キャンバス表示", e.getMessage());
         }
     }
 
-    private void renderCanvasItems(Pane canvas, String layoutName, boolean interactive, Path selectedPath, java.util.function.Consumer<Path> onSelect, java.util.function.Consumer<Path> onRemove) {
+    void renderCanvasItems(Pane canvas, String layoutName, boolean interactive, Path selectedPath, java.util.function.Consumer<Path> onSelect, java.util.function.Consumer<Path> onRemove) {
         canvas.getChildren().removeIf(node -> node instanceof VBox);
         double canvasW = Math.max(1, canvas.getPrefWidth());
         double canvasH = Math.max(1, canvas.getPrefHeight());
@@ -2742,7 +1963,7 @@ public final class GazoApp extends Application {
         }
     }
 
-    private void autoLayoutCanvas(Pane canvas, String layoutName, String presetName, double overlapTuning, double neatTuning) {
+    void autoLayoutCanvas(Pane canvas, String layoutName, String presetName, double overlapTuning, double neatTuning) {
         if (canvasSelection.isEmpty()) {
             return;
         }
@@ -2768,7 +1989,7 @@ public final class GazoApp extends Application {
                 vault.setCanvasPosition(layoutName, path, x / Math.max(1, frameW), y / Math.max(1, frameH));
                 vault.setDisplaySize(path, sizeCode);
             } catch (IOException e) {
-                showWarn("自動レイアウト保存エラー", e.getMessage());
+                GazoFx.showWarn("自動レイアウト保存エラー", e.getMessage());
             }
             placed.add(new double[]{x, y, w, h});
         }
@@ -2970,7 +2191,7 @@ public final class GazoApp extends Application {
                 double ch = Math.max(1.0, canvas.getPrefHeight());
                 vault.setCanvasPosition(layoutName, imagePath, node.getLayoutX() / cw, node.getLayoutY() / ch);
             } catch (IOException e) {
-                showWarn("キャンバス保存エラー", e.getMessage());
+                GazoFx.showWarn("キャンバス保存エラー", e.getMessage());
             }
         });
     }
@@ -3000,7 +2221,7 @@ public final class GazoApp extends Application {
             try {
                 vault.setCanvasTransform(layoutName, imagePath, (Double) node.getProperties().get("gazoScale"), (Double) node.getProperties().get("gazoRotation"));
             } catch (IOException e) {
-                showWarn("キャンバス変形保存エラー", e.getMessage());
+                GazoFx.showWarn("キャンバス変形保存エラー", e.getMessage());
             }
             event.consume();
         });
