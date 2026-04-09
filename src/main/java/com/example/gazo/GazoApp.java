@@ -2,6 +2,8 @@ package com.example.gazo;
 
 import com.example.gazo.cli.CliImport;
 import com.example.gazo.vault.GazoVaultService;
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.concurrent.Task;
@@ -17,6 +19,7 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContentDisplay;
+import javafx.scene.control.CustomMenuItem;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
@@ -24,6 +27,7 @@ import javafx.scene.control.ListView;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
+import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SplitPane;
@@ -35,6 +39,8 @@ import javafx.scene.control.TabPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
+import javafx.scene.control.OverrunStyle;
+import javafx.scene.control.cell.CheckBoxListCell;
 import javafx.scene.Group;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
@@ -52,6 +58,8 @@ import javafx.scene.transform.Scale;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseButton;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.TransferMode;
 import javafx.scene.text.Text;
 import javafx.scene.media.Media;
@@ -100,10 +108,18 @@ public final class GazoApp extends Application {
     private Label vaultPathLabel;
     /** 絞り込みに使うタグ（正規化済み・小文字）。空なら「すべて表示」。複数指定時は AND（すべて含む）。 */
     private final LinkedHashSet<String> activeTagFilters = new LinkedHashSet<>();
-    private FlowPane tagFilterPane;
+    private MenuButton tagFilterMenuButton;
+    private ListView<String> tagFilterListView;
+    private final Map<String, BooleanProperty> tagFilterSelectionMap = new java.util.LinkedHashMap<>();
+    private boolean updatingTagFilterSelection;
+    private MenuButton displayOptionsMenuButton;
+    private ListView<String> displayOptionsListView;
+    private final Map<String, BooleanProperty> displayOptionSelectionMap = new java.util.LinkedHashMap<>();
+    private boolean updatingDisplayOptionSelection;
     private boolean showFileName = true;
     private boolean showDate = true;
     private boolean showTags = true;
+    private String imageNameQuery = "";
     static final List<String> LAYOUT_PRESETS = List.of("コラージュ風", "整列風");
     private static final List<String> LIST_VIEW_SIZE_OPTIONS = List.of("小", "中", "大");
     final Set<Path> canvasSelection = new LinkedHashSet<>();
@@ -160,6 +176,8 @@ public final class GazoApp extends Application {
         addMenu.setOnAction(e -> addImages(stage));
         MenuItem addVideosMenu = new MenuItem("動画を追加…");
         addVideosMenu.setOnAction(e -> addVideos(stage));
+        MenuItem rebuildThumbsMenu = new MenuItem("サムネイル再作成…");
+        rebuildThumbsMenu.setOnAction(e -> rebuildAllThumbnails());
         MenuItem duplicateMenu = new MenuItem("重複チェック");
         duplicateMenu.setOnAction(e -> showDuplicateReport());
         MenuItem bulkAddMenu = new MenuItem("タグ一括追加");
@@ -168,63 +186,89 @@ public final class GazoApp extends Application {
         bulkRemoveMenu.setOnAction(e -> removeTagsFromCanvasSelection());
         MenuItem changeVaultMenu = new MenuItem("Vault変更…");
         changeVaultMenu.setOnAction(e -> changeVaultPath(stage));
-        Menu actionsMenu = new Menu("操作");
-        actionsMenu.getItems().addAll(
+        MenuItem exitMenu = new MenuItem("終了");
+        exitMenu.setOnAction(e -> Platform.exit());
+
+        Menu fileMenu = new Menu("ファイル");
+        fileMenu.getItems().addAll(
                 addMenu,
                 addVideosMenu,
+                rebuildThumbsMenu,
+                new SeparatorMenuItem(),
+                changeVaultMenu,
+                new SeparatorMenuItem(),
+                exitMenu);
+
+        Menu actionsMenu = new Menu("操作");
+        actionsMenu.getItems().addAll(
                 duplicateMenu,
                 new SeparatorMenuItem(),
                 bulkAddMenu,
                 bulkRemoveMenu,
-                new SeparatorMenuItem(),
-                changeVaultMenu);
-        MenuBar menuBar = new MenuBar(actionsMenu);
+                new SeparatorMenuItem());
+        MenuBar menuBar = new MenuBar(fileMenu, actionsMenu);
         Button selectAll = new Button("全選択");
         selectAll.setOnAction(e -> selectAllVisibleImages());
         Button clearSelection = new Button("クリア");
         clearSelection.setOnAction(e -> clearListCheckedSelection());
-        Button canvasHub = new Button("キャンバス");
+        Button canvasHub = new Button("選択画像でキャンバス作成");
         canvasHub.setOnAction(e -> showCanvasHubDialog(stage));
-        tagFilterPane = new FlowPane(8, 4);
-        tagFilterPane.setPrefWrapLength(380);
-        ScrollPane tagFilterScroll = new ScrollPane(tagFilterPane);
-        tagFilterScroll.setFitToWidth(true);
-        tagFilterScroll.setPrefViewportHeight(36);
-        tagFilterScroll.setMaxHeight(44);
-        tagFilterScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-        tagFilterScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        tagFilterScroll.setMinViewportWidth(200);
-        tagFilterScroll.setMaxWidth(440);
-        Button clearTagFiltersBtn = new Button("解除");
+        Button randomCanvasHub = new Button("ランダムにキャンバスを作成");
+        randomCanvasHub.setOnAction(e -> showCanvasHubDialogRandom(stage));
+        tagFilterListView = new ListView<>();
+        tagFilterListView.setPrefWidth(260);
+        tagFilterListView.setPrefHeight(220);
+        tagFilterListView.setCellFactory(CheckBoxListCell.forListView(tag -> {
+            BooleanProperty prop = tagFilterSelectionMap.computeIfAbsent(tag, k -> {
+                SimpleBooleanProperty p = new SimpleBooleanProperty(false);
+                p.addListener((obs, oldV, newV) -> {
+                    if (!updatingTagFilterSelection) {
+                        onTagFilterCheckboxChanged();
+                    }
+                });
+                return p;
+            });
+            return prop;
+        }));
+        CustomMenuItem tagFilterMenuItem = new CustomMenuItem(tagFilterListView, false);
+        tagFilterMenuButton = new MenuButton("タグ: すべて");
+        tagFilterMenuButton.getItems().setAll(tagFilterMenuItem);
+        tagFilterMenuButton.setPrefWidth(180);
+        Button clearTagFiltersBtn = new Button("×");
         clearTagFiltersBtn.setTooltip(new Tooltip("タグの絞り込みを解除"));
+        clearTagFiltersBtn.setFocusTraversable(false);
+        clearTagFiltersBtn.setStyle("-fx-font-weight: bold; -fx-padding: 2 8;");
         clearTagFiltersBtn.setOnAction(e -> {
             activeTagFilters.clear();
-            for (Node n : tagFilterPane.getChildren()) {
-                if (n instanceof CheckBox cb) {
-                    cb.setSelected(false);
+            updatingTagFilterSelection = true;
+            try {
+                for (BooleanProperty p : tagFilterSelectionMap.values()) {
+                    p.set(false);
                 }
+            } finally {
+                updatingTagFilterSelection = false;
             }
             refreshGallery();
             refreshVideoList();
+            updateTagFilterButtonText();
         });
-        CheckBox fileNameToggle = new CheckBox("ファイル名");
-        fileNameToggle.setSelected(true);
-        fileNameToggle.selectedProperty().addListener((obs, oldV, newV) -> {
-            showFileName = newV;
-            refreshGallery();
-        });
-        CheckBox dateToggle = new CheckBox("日付");
-        dateToggle.setSelected(true);
-        dateToggle.selectedProperty().addListener((obs, oldV, newV) -> {
-            showDate = newV;
-            refreshGallery();
-        });
-        CheckBox tagToggle = new CheckBox("タグ");
-        tagToggle.setSelected(true);
-        tagToggle.selectedProperty().addListener((obs, oldV, newV) -> {
-            showTags = newV;
-            refreshGallery();
-        });
+        displayOptionsListView = new ListView<>();
+        displayOptionsListView.setPrefWidth(170);
+        displayOptionsListView.setPrefHeight(124);
+        displayOptionsListView.setCellFactory(CheckBoxListCell.forListView(this::displayOptionProperty));
+        displayOptionsListView.getItems().setAll("ファイル名", "日付", "タグ");
+        CustomMenuItem displayOptionsMenuItem = new CustomMenuItem(displayOptionsListView, false);
+        displayOptionsMenuButton = new MenuButton("表示: 3/3");
+        displayOptionsMenuButton.getItems().setAll(displayOptionsMenuItem);
+        updatingDisplayOptionSelection = true;
+        try {
+            displayOptionProperty("ファイル名").set(true);
+            displayOptionProperty("日付").set(true);
+            displayOptionProperty("タグ").set(true);
+        } finally {
+            updatingDisplayOptionSelection = false;
+        }
+        updateDisplayOptionsButtonText();
         ComboBox<String> listSizeCombo = new ComboBox<>();
         listSizeCombo.getItems().setAll(LIST_VIEW_SIZE_OPTIONS);
         listSizeCombo.setValue(listViewSize);
@@ -233,6 +277,18 @@ public final class GazoApp extends Application {
             listViewSize = selected == null ? "中" : selected;
             refreshGallery();
         });
+        TextField imageSearchField = new TextField();
+        imageSearchField.setPromptText("ファイル名検索");
+        imageSearchField.setPrefWidth(180);
+        imageSearchField.textProperty().addListener((obs, oldV, newV) -> {
+            imageNameQuery = newV == null ? "" : newV.trim().toLowerCase();
+            refreshGallery();
+        });
+        Button clearImageSearchButton = new Button("×");
+        clearImageSearchButton.setTooltip(new Tooltip("ファイル名検索をクリア"));
+        clearImageSearchButton.setFocusTraversable(false);
+        clearImageSearchButton.setStyle("-fx-font-weight: bold; -fx-padding: 2 8;");
+        clearImageSearchButton.setOnAction(e -> imageSearchField.clear());
         vaultPathLabel = new Label();
         updateVaultPathLabel();
 
@@ -241,13 +297,14 @@ public final class GazoApp extends Application {
                 selectAll,
                 clearSelection,
                 canvasHub,
+                randomCanvasHub,
                 new Label("タグ:"),
+                tagFilterMenuButton,
                 clearTagFiltersBtn,
-                tagFilterScroll,
-                new Label("表示:"),
-                fileNameToggle,
-                dateToggle,
-                tagToggle,
+                displayOptionsMenuButton,
+                new Label("検索:"),
+                imageSearchField,
+                clearImageSearchButton,
                 new Label("一覧サイズ:"),
                 listSizeCombo);
         imageToolbar.setAlignment(Pos.CENTER_LEFT);
@@ -279,7 +336,10 @@ public final class GazoApp extends Application {
         homeCanvasLayoutLabel.setStyle("-fx-font-weight: bold;");
         Button homeCanvasShuffleButton = new Button("別のキャンバス");
         homeCanvasShuffleButton.setOnAction(e -> refreshRandomCanvasPreview(homeCanvasPane, homeCanvasLayoutLabel, true));
-        HBox homeCanvasBar = new HBox(12, new Label("キャンバス:"), homeCanvasLayoutLabel, homeCanvasShuffleButton);
+        Button homeCanvasSlideshowButton = new Button("スライドショーで開く");
+        homeCanvasSlideshowButton.setOnAction(e ->
+                showSlideshow(stage, parseHomeCanvasLayoutName(homeCanvasLayoutLabel)));
+        HBox homeCanvasBar = new HBox(12, new Label("キャンバス:"), homeCanvasLayoutLabel, homeCanvasShuffleButton, homeCanvasSlideshowButton);
         homeCanvasBar.setAlignment(Pos.CENTER_LEFT);
         homeCanvasBar.setPadding(new Insets(8, 10, 8, 10));
         homeCanvasBar.setStyle(
@@ -303,10 +363,11 @@ public final class GazoApp extends Application {
             }
         });
 
-        HBox top = new HBox(10, menuBar);
+        HBox top = new HBox(menuBar);
         top.setAlignment(Pos.CENTER_LEFT);
-        top.setPadding(new Insets(10));
-        top.setStyle("-fx-background-color: rgba(255,255,255,0.72); -fx-border-color: #d7d0c2; -fx-border-width: 0 0 1 0;");
+        top.setPadding(Insets.EMPTY);
+        // メニューバーをウィンドウ上端に密着させる。
+        top.setStyle("-fx-background-color: transparent; -fx-border-color: #d7d0c2; -fx-border-width: 0 0 1 0;");
 
         HBox statusBar = new HBox(vaultPathLabel);
         statusBar.setAlignment(Pos.CENTER_LEFT);
@@ -329,6 +390,8 @@ public final class GazoApp extends Application {
         refreshTagFilterOptions();
         refreshGallery();
         refreshVideoList();
+        // 起動直後にキャンバスプレビューを初期表示する。
+        refreshRandomCanvasPreview(homeCanvasPane, homeCanvasLayoutLabel, false);
         Platform.runLater(this::fitHomeCanvasPreview);
     }
 
@@ -417,6 +480,10 @@ public final class GazoApp extends Application {
     }
 
     void showSlideshow(Stage owner) {
+        showSlideshow(owner, null);
+    }
+
+    void showSlideshow(Stage owner, String initialCanvasName) {
         if (canvasSelection.isEmpty()) {
             GazoFx.showWarn("スライドショー", "キャンバスに画像を追加してください。");
             return;
@@ -433,7 +500,14 @@ public final class GazoApp extends Application {
             return;
         }
         List<Path> selectionBackup = new ArrayList<>(canvasSelection);
-        AtomicInteger idx = new AtomicInteger(0);
+        int initialIndex = 0;
+        if (initialCanvasName != null && !initialCanvasName.isBlank()) {
+            int i = layoutNames.indexOf(initialCanvasName);
+            if (i >= 0) {
+                initialIndex = i;
+            }
+        }
+        AtomicInteger idx = new AtomicInteger(initialIndex);
         Pane canvas = new Pane();
         canvas.setStyle("-fx-background-color: linear-gradient(to bottom, #f0ede4, #e4dccb);");
         final Scale holderScale = new Scale(1, 1, 0, 0);
@@ -653,6 +727,40 @@ public final class GazoApp extends Application {
         refreshVideoList();
     }
 
+    private void rebuildAllThumbnails() {
+        Alert confirm = new Alert(
+                Alert.AlertType.CONFIRMATION,
+                "登録済み画像のサムネイルを再作成します。画像数が多い場合は時間がかかります。実行しますか？",
+                ButtonType.OK,
+                ButtonType.CANCEL);
+        confirm.setTitle("サムネイル再作成");
+        confirm.setHeaderText(null);
+        Optional<ButtonType> result = confirm.showAndWait();
+        if (result.isEmpty() || result.get() != ButtonType.OK) {
+            return;
+        }
+
+        Task<Integer> task = new Task<>() {
+            @Override
+            protected Integer call() throws Exception {
+                return vault.rebuildAllThumbnails();
+            }
+        };
+        task.setOnSucceeded(e -> {
+            Integer count = task.getValue();
+            GazoFx.showWarn("サムネイル再作成", (count == null ? 0 : count) + " 件を再作成しました。");
+            refreshGallery();
+        });
+        task.setOnFailed(e -> {
+            Throwable ex = task.getException();
+            GazoFx.showError("サムネイル再作成エラー", ex != null ? ex.getMessage() : "不明なエラー");
+        });
+
+        Thread t = new Thread(task, "gazo-rebuild-thumbnails");
+        t.setDaemon(true);
+        t.start();
+    }
+
     void refreshGallery() {
         gallery.getChildren().clear();
         try {
@@ -828,6 +936,12 @@ public final class GazoApp extends Application {
             if (!matchesTagFilter(tags)) {
                 continue;
             }
+            if (!imageNameQuery.isBlank()) {
+                String fileName = p.getFileName().toString().toLowerCase();
+                if (!fileName.contains(imageNameQuery)) {
+                    continue;
+                }
+            }
             filtered.add(p);
         }
         return filtered;
@@ -843,16 +957,110 @@ public final class GazoApp extends Application {
 
     private void onTagFilterCheckboxChanged() {
         activeTagFilters.clear();
-        for (Node n : tagFilterPane.getChildren()) {
-            if (n instanceof CheckBox cb && cb.isSelected()) {
-                Object data = cb.getUserData();
-                if (data instanceof String tag) {
-                    activeTagFilters.add(tag);
-                }
+        for (Map.Entry<String, BooleanProperty> entry : tagFilterSelectionMap.entrySet()) {
+            if (entry.getValue().get()) {
+                activeTagFilters.add(entry.getKey());
             }
         }
         refreshGallery();
         refreshVideoList();
+        updateTagFilterButtonText();
+    }
+
+    private void updateTagFilterButtonText() {
+        if (tagFilterMenuButton == null) {
+            return;
+        }
+        if (activeTagFilters.isEmpty()) {
+            tagFilterMenuButton.setText("タグ: すべて");
+            return;
+        }
+        tagFilterMenuButton.setText("タグ: " + activeTagFilters.size() + "件選択");
+    }
+
+    private BooleanProperty displayOptionProperty(String label) {
+        return displayOptionSelectionMap.computeIfAbsent(label, k -> {
+            SimpleBooleanProperty p = new SimpleBooleanProperty(false);
+            p.addListener((obs, oldV, newV) -> {
+                if (!updatingDisplayOptionSelection) {
+                    onDisplayOptionsChanged();
+                }
+            });
+            return p;
+        });
+    }
+
+    private void onDisplayOptionsChanged() {
+        BooleanProperty fileNameProp = displayOptionSelectionMap.get("ファイル名");
+        BooleanProperty dateProp = displayOptionSelectionMap.get("日付");
+        BooleanProperty tagProp = displayOptionSelectionMap.get("タグ");
+        showFileName = fileNameProp != null && fileNameProp.get();
+        showDate = dateProp != null && dateProp.get();
+        showTags = tagProp != null && tagProp.get();
+        updateDisplayOptionsButtonText();
+        refreshGallery();
+    }
+
+    private void updateDisplayOptionsButtonText() {
+        if (displayOptionsMenuButton == null) {
+            return;
+        }
+        int selected = 0;
+        if (showFileName) {
+            selected++;
+        }
+        if (showDate) {
+            selected++;
+        }
+        if (showTags) {
+            selected++;
+        }
+        displayOptionsMenuButton.setText("表示: " + selected + "/3");
+    }
+
+    boolean isShowFileNameOption() {
+        return showFileName;
+    }
+
+    void setShowFileNameOption(boolean enabled) {
+        showFileName = enabled;
+        BooleanProperty fileNameProp = displayOptionSelectionMap.get("ファイル名");
+        if (fileNameProp != null) {
+            updatingDisplayOptionSelection = true;
+            try {
+                fileNameProp.set(enabled);
+            } finally {
+                updatingDisplayOptionSelection = false;
+            }
+        }
+        updateDisplayOptionsButtonText();
+        refreshGallery();
+    }
+
+    /**
+     * 既に描画済みのキャンバス項目に対して、ファイル名ラベルの表示だけを切り替える。
+     * 配置再計算は行わないため、ON/OFFで座標は変わらない。
+     */
+    void applyCanvasFileNameVisibility(Pane canvas) {
+        if (canvas == null) {
+            return;
+        }
+        for (Node node : canvas.getChildren()) {
+            if (node instanceof VBox box && box.getChildren().size() >= 2) {
+                Node n = box.getChildren().get(1);
+                if (n instanceof Label label) {
+                    if (showFileName) {
+                        label.setVisible(true);
+                        label.setOpacity(1.0);
+                        label.setMouseTransparent(false);
+                    } else {
+                        label.setVisible(false);
+                        label.setOpacity(0.0);
+                        label.setMouseTransparent(true);
+                    }
+                }
+            }
+        }
     }
 
     private List<Path> listFilteredImages() throws IOException {
@@ -869,21 +1077,33 @@ public final class GazoApp extends Application {
     }
 
     private void refreshTagFilterOptions() {
-        if (tagFilterPane == null || vault == null) {
+        if (tagFilterListView == null || vault == null) {
             return;
         }
         try {
             List<String> allTags = new ArrayList<>(vault.listAllTags());
             Collections.sort(allTags);
             activeTagFilters.retainAll(allTags);
-            tagFilterPane.getChildren().clear();
-            for (String tag : allTags) {
-                CheckBox cb = new CheckBox(tag);
-                cb.setUserData(tag);
-                cb.setSelected(activeTagFilters.contains(tag));
-                cb.setOnAction(e -> onTagFilterCheckboxChanged());
-                tagFilterPane.getChildren().add(cb);
+            tagFilterSelectionMap.keySet().retainAll(allTags);
+            updatingTagFilterSelection = true;
+            try {
+                tagFilterListView.getItems().setAll(allTags);
+                for (String tag : allTags) {
+                    BooleanProperty prop = tagFilterSelectionMap.computeIfAbsent(tag, k -> {
+                        SimpleBooleanProperty p = new SimpleBooleanProperty(false);
+                        p.addListener((obs, oldV, newV) -> {
+                            if (!updatingTagFilterSelection) {
+                                onTagFilterCheckboxChanged();
+                            }
+                        });
+                        return p;
+                    });
+                    prop.set(activeTagFilters.contains(tag));
+                }
+            } finally {
+                updatingTagFilterSelection = false;
             }
+            updateTagFilterButtonText();
         } catch (IOException e) {
             GazoFx.showError("タグ読み込みエラー", e.getMessage());
         }
@@ -1445,7 +1665,14 @@ public final class GazoApp extends Application {
     }
 
     private Image loadThumbnail(Path path, int width, int height) {
-        try (InputStream in = Files.newInputStream(path)) {
+        Path source = path;
+        if (vault != null) {
+            Path thumb = vault.thumbnailFor(path);
+            if (thumb != null) {
+                source = thumb;
+            }
+        }
+        try (InputStream in = Files.newInputStream(source)) {
             return new Image(in, width, height, true, true);
         } catch (IOException e) {
             return null;
@@ -1486,6 +1713,8 @@ public final class GazoApp extends Application {
         fitCheck.setSelected(true);
         fitCheck.setStyle("-fx-text-fill: #ddd;");
         Button tagEditButton = new Button("タグ編集");
+        Button copyFileNameButton = new Button("ファイル名コピー");
+        copyFileNameButton.setTooltip(new Tooltip("現在表示中のファイル名をコピー"));
         Label label = new Label();
         label.setStyle("-fx-text-fill: #ddd;");
         Label hint = new Label("← / → または A / D で移動、Esc で閉じる");
@@ -1497,7 +1726,7 @@ public final class GazoApp extends Application {
         scroll.setFitToWidth(false);
         scroll.setFitToHeight(false);
 
-        VBox bottom = new VBox(6, new HBox(10, fitCheck, tagEditButton, label), hint);
+        VBox bottom = new VBox(6, new HBox(10, fitCheck, tagEditButton, copyFileNameButton, label), hint);
         bottom.setPadding(new Insets(8, 14, 12, 14));
 
         BorderPane root = new BorderPane();
@@ -1549,12 +1778,25 @@ public final class GazoApp extends Application {
             } else {
                 center.setMinSize(0, 0);
             }
-            label.setText((i + 1) + "/" + images.size() + "  " + path.getFileName());
+            String sizeText = "";
+            if (img != null) {
+                int w = (int) Math.round(img.getWidth());
+                int h = (int) Math.round(img.getHeight());
+                sizeText = "  (" + w + " x " + h + ")";
+            }
+            label.setText((i + 1) + "/" + images.size() + "  " + path.getFileName() + sizeText);
         };
         tagEditButton.setOnAction(e -> {
             Path path = images.get(index.get());
             editTags(path);
             render.run();
+        });
+        copyFileNameButton.setOnAction(e -> {
+            Path path = images.get(index.get());
+            ClipboardContent content = new ClipboardContent();
+            content.putString(path.getFileName().toString());
+            Clipboard.getSystemClipboard().setContent(content);
+            GazoFx.showWarn("コピー", "ファイル名をクリップボードにコピーしました。");
         });
         fitCheck.setOnAction(e -> applyViewMode.run());
         scroll.viewportBoundsProperty().addListener((obs, oldB, newB) -> {
@@ -1717,6 +1959,10 @@ public final class GazoApp extends Application {
      */
     private void showCanvasHubDialog(Stage owner) {
         CanvasHubDialog.open(this, owner);
+    }
+
+    private void showCanvasHubDialogRandom(Stage owner) {
+        CanvasHubDialog.open(this, owner, true);
     }
 
     int parsePickCount(String text, int max) {
@@ -2133,8 +2379,8 @@ public final class GazoApp extends Application {
             return null;
         }
         ImageView view = new ImageView(image);
-        view.setFitWidth(wh[0]);
-        view.setFitHeight(wh[1]);
+        // 画像自体は loadThumbnail 時点で縮小済み。ここで正方形の fit 枠を作らないことで、
+        // 縦長画像の右側に大きな余白が出るのを防ぐ。
         view.setPreserveRatio(true);
         view.setOnMouseClicked(e -> {
             if (e.getButton() == MouseButton.PRIMARY && e.getClickCount() == 2) {
@@ -2144,6 +2390,18 @@ public final class GazoApp extends Application {
             }
         });
         Label label = new Label(path.getFileName().toString());
+        // ファイル名が長くてもカード幅（白背景）は画像幅を超えないようにする。
+        double labelW = Math.max(1.0, image.getWidth());
+        label.setMaxWidth(labelW);
+        label.setPrefWidth(labelW);
+        label.setWrapText(false);
+        label.setTextOverrun(OverrunStyle.ELLIPSIS);
+        if (!showFileName) {
+            // 配置計算のサイズを安定させるため、ラベル領域は残したまま不可視化する。
+            label.setVisible(false);
+            label.setOpacity(0.0);
+            label.setMouseTransparent(true);
+        }
         VBox box = new VBox(6, view, label);
         box.setPadding(new Insets(8));
         box.setStyle("-fx-background-color: white; -fx-border-color: #cfc8ba; -fx-border-radius: 2; -fx-background-radius: 2;");

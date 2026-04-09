@@ -12,7 +12,10 @@ Cryptomator 互換 Vault に画像を暗号化保存し、ギャラリー表示�
 ```bash
 ./gradlew build          # Windows: gradlew.bat build
 ./gradlew fatJar         # 依存ライブラリ込みの JAR（build/libs/gazo-1.0-SNAPSHOT-all.jar）
+./gradlew jpackageWin    # Windows の app-image（build/jpackage/Gazo/）
 ```
+
+`jpackageWin` は `packaging/windows/app-icon.ico` をアイコンとして使用します（Windows のタスクバー反映用）。
 
 ## GUI の起動
 

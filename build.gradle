@@ -32,6 +32,10 @@ application {
     mainClass = 'com.example.gazo.GazoApp'
 }
 
+def appName = 'Gazo'
+def appVersion = project.version.toString()
+def appIconPath = file('packaging/windows/app-icon.ico')
+
 tasks.register('fatJar', Jar) {
     group = 'build'
     description = 'Assembles an executable JAR with dependencies.'
@@ -46,6 +50,46 @@ tasks.register('fatJar', Jar) {
         configurations.runtimeClasspath
                 .findAll { it.name.endsWith('jar') }
                 .collect { zipTree(it) }
+    }
+}
+
+tasks.register('jpackageWin') {
+    group = 'distribution'
+    description = 'Builds a Windows app image with jpackage.'
+    dependsOn(tasks.named('fatJar'))
+
+    doLast {
+        def osName = System.getProperty('os.name', '').toLowerCase()
+        if (!osName.contains('win')) {
+            throw new GradleException('jpackageWin can only run on Windows.')
+        }
+
+        def jpackageExe = "${System.getProperty('java.home')}\\bin\\jpackage.exe"
+        if (!file(jpackageExe).exists()) {
+            throw new GradleException("jpackage.exe not found: ${jpackageExe}")
+        }
+
+        def inputDir = file("$buildDir/libs")
+        def outputDir = file("$buildDir/jpackage")
+        outputDir.mkdirs()
+        if (!appIconPath.exists()) {
+            throw new GradleException("Icon file not found: ${appIconPath}. Place a Windows .ico at packaging/windows/app-icon.ico")
+        }
+
+        def jarName = tasks.named('fatJar', Jar).get().archiveFileName.get()
+        exec {
+            commandLine(
+                    jpackageExe,
+                    '--type', 'app-image',
+                    '--name', appName,
+                    '--app-version', appVersion,
+                    '--input', inputDir.absolutePath,
+                    '--main-jar', jarName,
+                    '--main-class', application.mainClass.get(),
+                    '--icon', appIconPath.absolutePath,
+                    '--dest', outputDir.absolutePath
+            )
+        }
     }
 }
 

@@ -1,5 +1,7 @@
 package com.example.gazo;
 
+import javafx.beans.property.BooleanProperty;
+import javafx.beans.property.SimpleBooleanProperty;
 import javafx.application.Platform;
 import javafx.geometry.Bounds;
 import javafx.geometry.Insets;
@@ -10,6 +12,7 @@ import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContentDisplay;
 import javafx.scene.control.Dialog;
@@ -24,6 +27,8 @@ import javafx.scene.control.TabPane;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
+import javafx.scene.control.Spinner;
+import javafx.scene.control.SpinnerValueFactory;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
@@ -51,6 +56,10 @@ public final class CanvasHubDialog {
     }
 
     public static void open(GazoApp app, Stage owner) {
+        open(app, owner, false);
+    }
+
+    public static void open(GazoApp app, Stage owner, boolean openRandomTabOnStart) {
     if (!app.listCheckedSelection.isEmpty()) {
         app.canvasSelection.clear();
         app.canvasSelection.addAll(app.listCheckedSelection);
@@ -88,6 +97,8 @@ public final class CanvasHubDialog {
     ListView<String> canvasListView = new ListView<>();
     AtomicReference<Runnable> refreshCanvasList = new AtomicReference<>(() -> {});
     AtomicReference<Path> selectedCanvasImage = new AtomicReference<>(null);
+    BooleanProperty showFileNameInCanvas = new SimpleBooleanProperty(app.isShowFileNameOption());
+    AtomicReference<Pane> randomCanvasRef = new AtomicReference<>(null);
 
     Tab editTab = new Tab("キャンバス編集");
     editTab.setClosable(false);
@@ -316,6 +327,11 @@ public final class CanvasHubDialog {
                 neatSlider.getValue() / 100.0);
         render.run();
     });
+    showFileNameInCanvas.addListener((obs, oldV, newV) -> {
+        app.setShowFileNameOption(Boolean.TRUE.equals(newV));
+        app.applyCanvasFileNameVisibility(editCanvas);
+        app.applyCanvasFileNameVisibility(randomCanvasRef.get());
+    });
 
     HBox editToolBarPrimary = new HBox(12, layoutNameLabel, overwriteSaveButton, newLayoutButton);
     editToolBarPrimary.setPadding(new Insets(8, 12, 8, 12));
@@ -324,6 +340,8 @@ public final class CanvasHubDialog {
             "-fx-background-color: linear-gradient(to bottom, #faf8f3, #f2efe7);"
                     + "-fx-border-color: #d7d0c2; -fx-border-width: 0 0 1 0;");
 
+    CheckBox editShowNameCheck = new CheckBox("ファイル名");
+    editShowNameCheck.selectedProperty().bindBidirectional(showFileNameInCanvas);
     HBox editToolBarControls = new HBox(
             8,
             new Label("プリセット:"),
@@ -332,13 +350,22 @@ public final class CanvasHubDialog {
             overlapSlider,
             new Label("整列感"),
             neatSlider,
+            new Label("表示:"),
+            editShowNameCheck,
             autoLayoutButton);
     editToolBarControls.setPadding(new Insets(6, 12, 8, 12));
     editToolBarControls.setAlignment(Pos.CENTER_LEFT);
     editToolBarControls.setStyle(
             "-fx-background-color: rgba(255,255,255,0.65); -fx-border-color: #e7e2d8; -fx-border-width: 0 0 1 0;");
 
-    VBox editorVBox = new VBox(8, layoutTabs, editToolBarPrimary, editToolBarControls, editScroll);
+    Label editHelp = new Label(
+            "操作: 画像をドラッグで移動 / ホイールで拡大縮小 / Shift+ホイールで回転 / 右クリックで削除。"
+                    + " 右下ハンドルでキャンバスサイズ変更。");
+    editHelp.setWrapText(true);
+    editHelp.setStyle("-fx-text-fill: #666; -fx-font-size: 11px;");
+    editHelp.setPadding(new Insets(2, 12, 10, 12));
+
+    VBox editorVBox = new VBox(8, layoutTabs, editToolBarPrimary, editToolBarControls, editScroll, editHelp);
     VBox.setVgrow(editScroll, Priority.ALWAYS);
     editTab.setContent(editorVBox);
     updateLayoutNameLabel.run();
@@ -356,14 +383,20 @@ public final class CanvasHubDialog {
         randomNode = new Label("タグ／フィルターに一致する画像がありません。条件を変えてください。");
     } else {
         Pane randomCanvas = new Pane();
+        randomCanvasRef.set(randomCanvas);
         randomCanvas.setStyle("-fx-background-color: linear-gradient(to bottom, #f0ede4, #e4dccb);");
         randomCanvas.setPrefSize(1000, 700);
 
-        TextField countField = new TextField("6");
-        countField.setPrefWidth(56);
+        int initialPickCount = Math.max(1, Math.min(6, pool.size()));
+        Spinner<Integer> countSpinner = new Spinner<>();
+        countSpinner.setValueFactory(new SpinnerValueFactory.IntegerSpinnerValueFactory(1, pool.size(), initialPickCount));
+        countSpinner.setEditable(false);
+        countSpinner.setPrefWidth(84);
         Button prevButton = new Button("前のランダムピック");
         Button nextButton = new Button("次のランダムピック");
         Button createLayoutButton = new Button("名前を付けて保存…");
+        CheckBox randomShowNameCheck = new CheckBox("ファイル名");
+        randomShowNameCheck.selectedProperty().bindBidirectional(showFileNameInCanvas);
         Label pageLabel = new Label();
 
         List<List<Path>> history = new ArrayList<>();
@@ -388,7 +421,8 @@ public final class CanvasHubDialog {
                 renderCurrent.run();
                 return;
             }
-            int count = app.parsePickCount(countField.getText(), pool.size());
+            Integer selected = countSpinner.getValue();
+            int count = selected == null ? initialPickCount : Math.max(1, Math.min(pool.size(), selected));
             List<Path> pick = app.makeRandomPick(pool, count);
             history.add(pick);
             index.set(history.size() - 1);
@@ -466,9 +500,9 @@ public final class CanvasHubDialog {
             double baseW = 1000;
             double baseH = 700;
             randomCanvas.setPrefSize(Math.max(baseW, vw), Math.max(baseH, vh));
-            renderCurrent.run();
+            // リサイズ時は再抽選・再配置しない（現在表示中の配置を維持）。
         });
-        HBox controls = new HBox(8, new Label("枚数"), countField, prevButton, nextButton, createLayoutButton, new Label("履歴"), pageLabel);
+        HBox controls = new HBox(8, new Label("枚数"), countSpinner, randomShowNameCheck, prevButton, nextButton, createLayoutButton, new Label("履歴"), pageLabel);
         controls.setAlignment(Pos.CENTER_LEFT);
         VBox randomVBox = new VBox(8, controls, randomScroll);
         VBox.setVgrow(randomScroll, Priority.ALWAYS);
@@ -652,6 +686,9 @@ public final class CanvasHubDialog {
     TabPane tabPane = new TabPane(editTab, randomTab, listTab);
     tabPane.setMinHeight(420);
     tabsRef.set(tabPane);
+    if (openRandomTabOnStart) {
+        tabPane.getSelectionModel().select(randomTab);
+    }
 
     tabPane.getSelectionModel().selectedItemProperty().addListener((obs, o, n) -> {
         if (n == editTab) {

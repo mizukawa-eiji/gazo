@@ -1,6 +1,9 @@
 package com.example.gazo.vault;
 
 import javax.imageio.ImageIO;
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import org.cryptomator.cryptofs.CryptoFileSystem;
 import org.cryptomator.cryptofs.CryptoFileSystemProperties;
@@ -12,6 +15,7 @@ import org.cryptomator.cryptolib.common.MasterkeyFileAccess;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -38,6 +42,7 @@ public final class GazoVaultService implements AutoCloseable {
     private static final URI DEFAULT_KEY_ID = URI.create(MasterkeyFileKeyLoader.SCHEME + ":masterkey.cryptomator");
     private static final String IMAGES_DIR = "images";
     private static final String VIDEOS_DIR = "videos";
+    private static final String THUMBNAILS_DIR = "thumbnails";
     private static final String TAGS_FILE = ".gazo-tags.properties";
     private static final String DISPLAY_FILE = ".gazo-display.properties";
     private static final String CANVAS_FILE = ".gazo-canvas.properties";
@@ -87,6 +92,7 @@ public final class GazoVaultService implements AutoCloseable {
         cryptoFileSystem = CryptoFileSystemProvider.newFileSystem(vaultPath, propertiesFor(passphrase));
         Files.createDirectories(imagesDirectory());
         Files.createDirectories(videosDirectory());
+        Files.createDirectories(thumbnailsDirectory());
     }
 
     private void ensureUnlocked() {
@@ -101,6 +107,7 @@ public final class GazoVaultService implements AutoCloseable {
         Path root = cryptoFileSystem.getRootDirectories().iterator().next();
         Files.createDirectories(root.resolve(IMAGES_DIR));
         Files.createDirectories(root.resolve(VIDEOS_DIR));
+        Files.createDirectories(root.resolve(THUMBNAILS_DIR));
     }
 
     public Path cleartextRoot() {
@@ -116,11 +123,21 @@ public final class GazoVaultService implements AutoCloseable {
         return cleartextRoot().resolve(VIDEOS_DIR);
     }
 
+    public Path thumbnailsDirectory() {
+        return cleartextRoot().resolve(THUMBNAILS_DIR);
+    }
+
     public Path importImage(Path sourceFile) throws IOException {
         ensureUnlocked();
         String name = sourceFile.getFileName().toString();
         Path dest = resolveUniqueImagePath(name);
         Files.copy(sourceFile, dest);
+        // 登録時にサムネイルを生成（失敗しても登録自体は継続）。
+        try {
+            ensureThumbnailExists(dest);
+        } catch (Exception ignored) {
+            // ignore
+        }
         return dest;
     }
 
@@ -128,7 +145,105 @@ public final class GazoVaultService implements AutoCloseable {
         ensureUnlocked();
         Path dest = resolveUniqueImagePath(fileName);
         Files.copy(in, dest);
+        // 登録時にサムネイルを生成（失敗しても登録自体は継続）。
+        try {
+            ensureThumbnailExists(dest);
+        } catch (Exception ignored) {
+            // ignore
+        }
         return dest;
+    }
+
+    /**
+     * 画像のサムネイル（JPEG）パスを返す。存在しなければ生成を試みる。
+     * 生成に失敗した場合は null。
+     */
+    public Path thumbnailFor(Path imagePath) {
+        ensureUnlocked();
+        try {
+            return ensureThumbnailExists(imagePath);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * すべての画像サムネイルを再生成する。
+     *
+     * @return 再生成に成功したサムネイル数
+     */
+    public int rebuildAllThumbnails() throws IOException {
+        ensureUnlocked();
+        int count = 0;
+        for (Path image : listImages()) {
+            Path thumb = thumbnailPathFor(image);
+            try {
+                Files.deleteIfExists(thumb);
+            } catch (Exception ignored) {
+                // ignore
+            }
+            Path generated = thumbnailFor(image);
+            if (generated != null && Files.exists(generated)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private Path thumbnailPathFor(Path imagePath) {
+        String key = imagePath.getFileName().toString();
+        return thumbnailsDirectory().resolve(key + ".jpg");
+    }
+
+    /**
+     * サムネイルを生成して返す。すでに存在すればそのまま返す。
+     */
+    private Path ensureThumbnailExists(Path imagePath) throws IOException {
+        ensureUnlocked();
+        Path id = imagesDirectory().normalize();
+        if (!imagePath.normalize().startsWith(id)) {
+            throw new IllegalArgumentException("not under images directory");
+        }
+        Path thumb = thumbnailPathFor(imagePath);
+        if (Files.exists(thumb)) {
+            return thumb;
+        }
+        Files.createDirectories(thumbnailsDirectory());
+        createThumbnailJpeg(imagePath, thumb, 640);
+        return Files.exists(thumb) ? thumb : null;
+    }
+
+    private static void createThumbnailJpeg(Path source, Path dest, int maxEdge) throws IOException {
+        BufferedImage src;
+        try (InputStream in = Files.newInputStream(source)) {
+            src = ImageIO.read(in);
+        }
+        if (src == null) {
+            return;
+        }
+        int sw = Math.max(1, src.getWidth());
+        int sh = Math.max(1, src.getHeight());
+        double s = Math.min((double) maxEdge / sw, (double) maxEdge / sh);
+        s = Math.min(1.0, Math.max(0.01, s));
+        int tw = Math.max(1, (int) Math.round(sw * s));
+        int th = Math.max(1, (int) Math.round(sh * s));
+
+        BufferedImage out = new BufferedImage(tw, th, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = out.createGraphics();
+        try {
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setColor(Color.WHITE);
+            g.fillRect(0, 0, tw, th);
+            g.drawImage(src, 0, 0, tw, th, null);
+        } finally {
+            g.dispose();
+        }
+
+        try (OutputStream os = Files.newOutputStream(dest)) {
+            ImageIO.write(out, "jpg", os);
+        }
     }
 
     private Path resolveUniqueImagePath(String originalFileName) throws IOException {
@@ -259,6 +374,11 @@ public final class GazoVaultService implements AutoCloseable {
     public void deleteImage(Path imagePath) throws IOException {
         ensureUnlocked();
         Files.deleteIfExists(imagePath);
+        try {
+            Files.deleteIfExists(thumbnailPathFor(imagePath));
+        } catch (Exception ignored) {
+            // ignore
+        }
         String key = imagePath.getFileName().toString();
         Properties tagProps = loadTagProperties();
         tagProps.remove(key);
