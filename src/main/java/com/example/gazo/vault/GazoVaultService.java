@@ -399,7 +399,7 @@ public final class GazoVaultService implements AutoCloseable {
         saveCanvasTransformProperties(transformProps);
     }
 
-    private String sha256(Path path) throws IOException {
+    public String sha256(Path path) throws IOException {
         MessageDigest md;
         try {
             md = MessageDigest.getInstance("SHA-256");
@@ -421,7 +421,7 @@ public final class GazoVaultService implements AutoCloseable {
         return sb.toString();
     }
 
-    private Long dHash64(Path path) {
+    public Long dHash64(Path path) {
         try (InputStream in = Files.newInputStream(path)) {
             BufferedImage src = ImageIO.read(in);
             if (src == null) {

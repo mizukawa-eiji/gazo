@@ -72,6 +72,7 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
+import javafx.util.StringConverter;
 import org.cryptomator.cryptolib.api.InvalidPassphraseException;
 import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 
@@ -100,6 +101,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -117,6 +121,14 @@ public final class GazoApp extends Application {
     private Label appBusyMessageLabel;
     private FlowPane gallery;
     private FlowPane videoGallery;
+    private ScrollPane imageScrollPane;
+    /** 一覧サムネイルの読み込みを UI スレッド外で処理する。 */
+    private final ExecutorService galleryImageLoadExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "gazo-gallery-image-loader");
+        t.setDaemon(true);
+        return t;
+    });
+    private final AtomicInteger galleryImageLoadVersion = new AtomicInteger();
     private Label vaultPathLabel;
     /** インポート中のみファイル名を表示（通常は空） */
     private Label importStatusLabel;
@@ -126,6 +138,8 @@ public final class GazoApp extends Application {
     private final LinkedHashSet<String> activeTagFilters = new LinkedHashSet<>();
     private MenuButton tagFilterMenuButton;
     private ListView<String> tagFilterListView;
+    /** タグ絞り込みリストの各行に表示する件数（画像＋動画）。キーは {@link #TAG_FILTER_UNTAGGED} またはタグ名。 */
+    private final Map<String, Integer> tagFilterCounts = new HashMap<>();
     private final Map<String, BooleanProperty> tagFilterSelectionMap = new java.util.LinkedHashMap<>();
     private boolean updatingTagFilterSelection;
     private MenuButton displayOptionsMenuButton;
@@ -139,6 +153,8 @@ public final class GazoApp extends Application {
     private String imageNameQuery = "";
     static final List<String> LAYOUT_PRESETS = List.of("コラージュ風", "整列風");
     private static final List<String> LIST_VIEW_SIZE_OPTIONS = List.of("小", "中", "大");
+    /** タグ絞り込みで「タグなし」を表す。実タグ名としては使わない。 */
+    private static final String TAG_FILTER_UNTAGGED = "__gazo_untagged__";
     final Set<Path> canvasSelection = new LinkedHashSet<>();
     final Set<Path> listCheckedSelection = new LinkedHashSet<>();
     private String listViewSize = "中";
@@ -168,6 +184,7 @@ public final class GazoApp extends Application {
             if (vault != null) {
                 vault.close();
             }
+            galleryImageLoadExecutor.shutdownNow();
         }));
 
         primaryStage = stage;
@@ -193,6 +210,11 @@ public final class GazoApp extends Application {
 
         ScrollPane imageScroll = new ScrollPane(gallery);
         imageScroll.setFitToWidth(true);
+        imageScrollPane = imageScroll;
+        imageScroll.vvalueProperty().addListener((obs, ov, nv) -> refreshVisibleGalleryImages());
+        imageScroll.hvalueProperty().addListener((obs, ov, nv) -> refreshVisibleGalleryImages());
+        imageScroll.viewportBoundsProperty().addListener((obs, ov, nv) -> refreshVisibleGalleryImages());
+        gallery.heightProperty().addListener((obs, ov, nv) -> refreshVisibleGalleryImages());
 
         videoGallery = new FlowPane();
         videoGallery.setHgap(16);
@@ -248,18 +270,26 @@ public final class GazoApp extends Application {
         tagFilterListView = new ListView<>();
         tagFilterListView.setPrefWidth(260);
         tagFilterListView.setPrefHeight(220);
-        tagFilterListView.setCellFactory(CheckBoxListCell.forListView(tag -> {
-            BooleanProperty prop = tagFilterSelectionMap.computeIfAbsent(tag, k -> {
-                SimpleBooleanProperty p = new SimpleBooleanProperty(false);
-                p.addListener((obs, oldV, newV) -> {
-                    if (!updatingTagFilterSelection) {
-                        onTagFilterCheckboxChanged();
+        tagFilterListView.setCellFactory(CheckBoxListCell.forListView(
+                this::tagFilterBooleanProperty,
+                new StringConverter<>() {
+                    @Override
+                    public String toString(String object) {
+                        if (object == null) {
+                            return "";
+                        }
+                        int n = tagFilterCounts.getOrDefault(object, 0);
+                        if (TAG_FILTER_UNTAGGED.equals(object)) {
+                            return "（タグなし） (" + n + ")";
+                        }
+                        return object + " (" + n + ")";
                     }
-                });
-                return p;
-            });
-            return prop;
-        }));
+
+                    @Override
+                    public String fromString(String string) {
+                        return null;
+                    }
+                }));
         CustomMenuItem tagFilterMenuItem = new CustomMenuItem(tagFilterListView, false);
         tagFilterMenuButton = new MenuButton("タグ: すべて");
         tagFilterMenuButton.getItems().setAll(tagFilterMenuItem);
@@ -860,6 +890,7 @@ public final class GazoApp extends Application {
     }
 
     void refreshGallery() {
+        galleryImageLoadVersion.incrementAndGet();
         gallery.getChildren().clear();
         try {
             Map<String, Set<String>> tagMap = vault.tagsByFileName();
@@ -891,6 +922,7 @@ public final class GazoApp extends Application {
             Set<String> tags = tagMap.getOrDefault(p.getFileName().toString(), Set.of());
             gallery.getChildren().add(createSnapCard(p, tags));
         }
+        refreshVisibleGalleryImages();
         if (end < paths.size()) {
             Platform.runLater(() -> scheduleGalleryCards(paths, tagMap, end, batchSize));
         }
@@ -1060,12 +1092,36 @@ public final class GazoApp extends Application {
         return filtered;
     }
 
-    /** タグ未選択ならすべて表示。1つ以上なら、そのタグをすべて含むファイルだけ（AND）。 */
+    /**
+     * タグ未選択ならすべて表示。
+     * 1つ以上なら AND。{@link #TAG_FILTER_UNTAGGED} が含まれる場合は「タグが1つも付いていない」ことを要求する。
+     */
     private boolean matchesTagFilter(Set<String> fileTags) {
         if (activeTagFilters.isEmpty()) {
             return true;
         }
-        return fileTags.containsAll(activeTagFilters);
+        boolean wantUntagged = activeTagFilters.contains(TAG_FILTER_UNTAGGED);
+        Set<String> requiredTags = new LinkedHashSet<>(activeTagFilters);
+        requiredTags.remove(TAG_FILTER_UNTAGGED);
+        if (wantUntagged) {
+            if (!fileTags.isEmpty()) {
+                return false;
+            }
+            return requiredTags.isEmpty();
+        }
+        return fileTags.containsAll(requiredTags);
+    }
+
+    private BooleanProperty tagFilterBooleanProperty(String tag) {
+        return tagFilterSelectionMap.computeIfAbsent(tag, k -> {
+            SimpleBooleanProperty p = new SimpleBooleanProperty(false);
+            p.addListener((obs, oldV, newV) -> {
+                if (!updatingTagFilterSelection) {
+                    onTagFilterCheckboxChanged();
+                }
+            });
+            return p;
+        });
     }
 
     private void onTagFilterCheckboxChanged() {
@@ -1203,33 +1259,64 @@ public final class GazoApp extends Application {
         }
     }
 
+    /**
+     * 各タグを少なくとも1つ含むファイル数（画像および動画）と、タグなし件数を集計する。
+     */
+    private void rebuildTagFilterCounts(Map<String, Set<String>> tagMap) throws IOException {
+        tagFilterCounts.clear();
+        int untagged = 0;
+        Map<String, Integer> perTag = new HashMap<>();
+        for (Path p : vault.listImages()) {
+            Set<String> tags = tagMap.getOrDefault(p.getFileName().toString(), Set.of());
+            if (tags.isEmpty()) {
+                untagged++;
+            } else {
+                for (String t : tags) {
+                    perTag.merge(t, 1, Integer::sum);
+                }
+            }
+        }
+        for (Path p : vault.listVideos()) {
+            Set<String> tags = tagMap.getOrDefault(p.getFileName().toString(), Set.of());
+            if (tags.isEmpty()) {
+                untagged++;
+            } else {
+                for (String t : tags) {
+                    perTag.merge(t, 1, Integer::sum);
+                }
+            }
+        }
+        tagFilterCounts.put(TAG_FILTER_UNTAGGED, untagged);
+        tagFilterCounts.putAll(perTag);
+    }
+
     private void refreshTagFilterOptions() {
         if (tagFilterListView == null || vault == null) {
             return;
         }
         try {
+            Map<String, Set<String>> tagMap = vault.tagsByFileName();
+            rebuildTagFilterCounts(tagMap);
             List<String> allTags = new ArrayList<>(vault.listAllTags());
             Collections.sort(allTags);
-            activeTagFilters.retainAll(allTags);
-            tagFilterSelectionMap.keySet().retainAll(allTags);
+            LinkedHashSet<String> allowed = new LinkedHashSet<>(allTags);
+            allowed.add(TAG_FILTER_UNTAGGED);
+            activeTagFilters.retainAll(allowed);
+            tagFilterSelectionMap.keySet().retainAll(allowed);
+            List<String> items = new ArrayList<>(allTags.size() + 1);
+            items.add(TAG_FILTER_UNTAGGED);
+            items.addAll(allTags);
             updatingTagFilterSelection = true;
             try {
-                tagFilterListView.getItems().setAll(allTags);
-                for (String tag : allTags) {
-                    BooleanProperty prop = tagFilterSelectionMap.computeIfAbsent(tag, k -> {
-                        SimpleBooleanProperty p = new SimpleBooleanProperty(false);
-                        p.addListener((obs, oldV, newV) -> {
-                            if (!updatingTagFilterSelection) {
-                                onTagFilterCheckboxChanged();
-                            }
-                        });
-                        return p;
-                    });
+                tagFilterListView.getItems().setAll(items);
+                for (String tag : items) {
+                    BooleanProperty prop = tagFilterBooleanProperty(tag);
                     prop.set(activeTagFilters.contains(tag));
                 }
             } finally {
                 updatingTagFilterSelection = false;
             }
+            tagFilterListView.refresh();
             updateTagFilterButtonText();
             persistGallerySettings();
         } catch (IOException e) {
@@ -1385,6 +1472,11 @@ public final class GazoApp extends Application {
     }
 
     private static final String GALLERY_CANVAS_CHECK_KEY = "gazoCanvasCheck";
+    private static final String GALLERY_IMAGE_VIEW_KEY = "gazoImageView";
+    private static final String GALLERY_IMAGE_PATH_KEY = "gazoImagePath";
+    private static final String GALLERY_IMAGE_W_KEY = "gazoImageW";
+    private static final String GALLERY_IMAGE_H_KEY = "gazoImageH";
+    private static final String GALLERY_IMAGE_REQUEST_KEY = "gazoImageRequest";
 
     private void refreshGallerySelectionStyles() {
         for (Node n : gallery.getChildren()) {
@@ -1414,12 +1506,8 @@ public final class GazoApp extends Application {
         view.setPreserveRatio(true);
         view.setFitWidth(imageW);
         view.setFitHeight(imageH);
-        try (InputStream in = Files.newInputStream(imagePath)) {
-            Image image = new Image(in, imageW, imageH, true, true);
-            view.setImage(image);
-        } catch (IOException ignored) {
-            // ignore broken image
-        }
+        // 初期描画では画像を読まず、可視範囲に入ったカードだけ読み込む。
+        view.setImage(null);
 
         StackPane photoArea = new StackPane(view);
         photoArea.setPadding(new Insets(12, 12, 6, 12));
@@ -1456,6 +1544,10 @@ public final class GazoApp extends Application {
         card.setRotate(cardTiltFor(imagePath));
         card.setUserData(imagePath);
         card.getProperties().put(GALLERY_CANVAS_CHECK_KEY, canvasPickCheck);
+        card.getProperties().put(GALLERY_IMAGE_VIEW_KEY, view);
+        card.getProperties().put(GALLERY_IMAGE_PATH_KEY, imagePath);
+        card.getProperties().put(GALLERY_IMAGE_W_KEY, imageW);
+        card.getProperties().put(GALLERY_IMAGE_H_KEY, imageH);
         canvasPickCheck.setOnAction(e -> {
             if (canvasPickCheck.isSelected()) {
                 listCheckedSelection.add(imagePath);
@@ -1465,6 +1557,70 @@ public final class GazoApp extends Application {
             card.setStyle(snapCardBorderStyle(listCheckedSelection.contains(imagePath)));
         });
         return card;
+    }
+
+    private void refreshVisibleGalleryImages() {
+        if (imageScrollPane == null || gallery == null || gallery.getScene() == null) {
+            return;
+        }
+        int version = galleryImageLoadVersion.get();
+        Bounds vp = imageScrollPane.getViewportBounds();
+        if (vp == null || vp.getWidth() <= 0 || vp.getHeight() <= 0) {
+            return;
+        }
+        Bounds viewportScene = imageScrollPane.localToScene(vp);
+        double margin = 280.0;
+        for (Node n : gallery.getChildren()) {
+            if (!(n instanceof VBox card)) {
+                continue;
+            }
+            Object ivObj = card.getProperties().get(GALLERY_IMAGE_VIEW_KEY);
+            Object pathObj = card.getProperties().get(GALLERY_IMAGE_PATH_KEY);
+            Object wObj = card.getProperties().get(GALLERY_IMAGE_W_KEY);
+            Object hObj = card.getProperties().get(GALLERY_IMAGE_H_KEY);
+            if (!(ivObj instanceof ImageView iv)
+                    || !(pathObj instanceof Path path)
+                    || !(wObj instanceof Integer w)
+                    || !(hObj instanceof Integer h)) {
+                continue;
+            }
+            Bounds cardScene = card.localToScene(card.getBoundsInLocal());
+            boolean nearViewport = cardScene.getMaxY() >= viewportScene.getMinY() - margin
+                    && cardScene.getMinY() <= viewportScene.getMaxY() + margin
+                    && cardScene.getMaxX() >= viewportScene.getMinX() - margin
+                    && cardScene.getMinX() <= viewportScene.getMaxX() + margin;
+            if (nearViewport) {
+                if (iv.getImage() == null) {
+                    requestGalleryImageLoad(iv, path, w, h, version);
+                }
+            } else if (iv.getImage() != null) {
+                iv.setImage(null);
+                iv.getProperties().remove(GALLERY_IMAGE_REQUEST_KEY);
+            } else {
+                // 画面外で画像未設定の場合も、次回表示時に再ロードできるよう要求IDを外す。
+                iv.getProperties().remove(GALLERY_IMAGE_REQUEST_KEY);
+            }
+        }
+    }
+
+    private void requestGalleryImageLoad(ImageView target, Path path, int w, int h, int version) {
+        String requestId = version + "|" + path + "|" + w + "x" + h;
+        Object prev = target.getProperties().get(GALLERY_IMAGE_REQUEST_KEY);
+        if (requestId.equals(prev)) {
+            return;
+        }
+        target.getProperties().put(GALLERY_IMAGE_REQUEST_KEY, requestId);
+        galleryImageLoadExecutor.submit(() -> {
+            Image img = loadThumbnail(path, w, h);
+            Platform.runLater(() -> {
+                Object current = target.getProperties().get(GALLERY_IMAGE_REQUEST_KEY);
+                if (!requestId.equals(current)) {
+                    return;
+                }
+                // 一覧更新やスクロールで要求が切り替わっていなければ反映する。
+                target.setImage(img);
+            });
+        });
     }
 
     private int[] imageSizeByCode(String code) {
@@ -1701,17 +1857,20 @@ public final class GazoApp extends Application {
         exactDupBox.setManaged(false);
         AtomicReference<ToggleGroup> exactKeepToggleGroupRef = new AtomicReference<>(new ToggleGroup());
 
-        Button deleteButton = new Button("選択削除");
         Button tagButton = new Button("選択にタグ付与");
+        Label scanStatusLabel = new Label("");
+        scanStatusLabel.setStyle("-fx-text-fill: #4a5560;");
         AtomicReference<List<GazoVaultService.SimilarPair>> similarRef = new AtomicReference<>(List.of());
         AtomicReference<List<List<Path>>> exactGroupsRef = new AtomicReference<>(List.of());
         AtomicReference<Path> selectedRef = new AtomicReference<>(null);
 
-        HBox controls = new HBox(8, new Label("類似判定距離:"), thresholdField, rerunButton, deleteButton, tagButton);
+        HBox controls = new HBox(8, new Label("類似判定距離:"), thresholdField, rerunButton, tagButton);
         controls.setAlignment(Pos.CENTER_LEFT);
+        VBox controlsBox = new VBox(4, controls, scanStatusLabel);
+        controlsBox.setAlignment(Pos.CENTER_LEFT);
         VBox content = new VBox(
                 8,
-                controls,
+                controlsBox,
                 new Label("候補画像:"),
                 candidateList,
                 previewBox,
@@ -1735,15 +1894,16 @@ public final class GazoApp extends Application {
 
         StackPane rootStack = new StackPane(content, busyPane);
         dialog.getDialogPane().setContent(rootStack);
+        busyPane.setMouseTransparent(true);
 
+        AtomicBoolean duplicateScanRunning = new AtomicBoolean(false);
         Runnable setDuplicateBusy = () -> {
-            boolean busy = busyPane.isVisible();
+            boolean busy = duplicateScanRunning.get();
             rerunButton.setDisable(busy);
             thresholdField.setDisable(busy);
-            deleteButton.setDisable(busy);
-            tagButton.setDisable(busy);
-            candidateList.setDisable(busy);
-            enlargeCompareButton.setDisable(busy);
+            boolean hasSelection = candidateList.getSelectionModel().getSelectedItem() != null;
+            tagButton.setDisable(busy || !hasSelection);
+            enlargeCompareButton.setDisable(!hasSelection);
             if (busy) {
                 mergeDeleteExactButton.setDisable(true);
             }
@@ -1799,45 +1959,126 @@ public final class GazoApp extends Application {
 
         Runnable refreshAsync = () -> {
             int threshold = parseThreshold(thresholdField.getText(), 8);
-            busyPane.setVisible(true);
-            busyPane.setManaged(true);
+            duplicateScanRunning.set(true);
+            busyPane.setVisible(false);
+            busyPane.setManaged(false);
+            scanStatusLabel.setText("重複を順次チェック中…");
             setDuplicateBusy.run();
 
-            record DupScan(List<List<Path>> exact, List<GazoVaultService.SimilarPair> similar) {}
-
-            Task<DupScan> task = new Task<>() {
+            Task<Void> task = new Task<>() {
                 @Override
-                protected DupScan call() throws IOException {
-                    List<List<Path>> exact = vault.findExactDuplicateGroups();
-                    List<GazoVaultService.SimilarPair> similar = vault.findSimilarPairs(threshold);
-                    return new DupScan(exact, similar);
+                protected Void call() throws IOException {
+                    List<Path> images = vault.listImages();
+                    int total = images.size();
+                    List<List<Path>> exact = new ArrayList<>();
+                    List<GazoVaultService.SimilarPair> similar = new ArrayList<>();
+                    Map<Path, String> shaCache = new HashMap<>();
+                    Map<Path, Long> dHashCache = new HashMap<>();
+                    LinkedHashSet<Path> candidates = new LinkedHashSet<>();
+
+                    for (int i = 0; i < total; i++) {
+                        Path current = images.get(i);
+                        String shaCurrent = shaCache.computeIfAbsent(current, p -> {
+                            try {
+                                return vault.sha256(p);
+                            } catch (IOException e) {
+                                return "";
+                            }
+                        });
+                        Long dhCurrent = dHashCache.computeIfAbsent(current, vault::dHash64);
+                        List<Path> exactMatches = new ArrayList<>();
+                        List<GazoVaultService.SimilarPair> similarMatches = new ArrayList<>();
+
+                        for (int j = i + 1; j < total; j++) {
+                            Path other = images.get(j);
+                            String shaOther = shaCache.computeIfAbsent(other, p -> {
+                                try {
+                                    return vault.sha256(p);
+                                } catch (IOException e) {
+                                    return "";
+                                }
+                            });
+                            if (!shaCurrent.isEmpty() && shaCurrent.equals(shaOther)) {
+                                exactMatches.add(other);
+                            }
+
+                            Long dhOther = dHashCache.computeIfAbsent(other, vault::dHash64);
+                            if (dhCurrent != null && dhOther != null) {
+                                int dist = Long.bitCount(dhCurrent ^ dhOther);
+                                if (dist <= threshold) {
+                                    similarMatches.add(new GazoVaultService.SimilarPair(current, other, dist));
+                                }
+                            }
+                        }
+
+                        if (!exactMatches.isEmpty()) {
+                            List<Path> group = new ArrayList<>();
+                            group.add(current);
+                            group.addAll(exactMatches);
+                            exact.add(group);
+                        }
+                        if (!similarMatches.isEmpty()) {
+                            similar.addAll(similarMatches);
+                        }
+                        if (!exactMatches.isEmpty() || !similarMatches.isEmpty()) {
+                            candidates.add(current);
+                            List<List<Path>> exactSnapshot = new ArrayList<>(exact);
+                            List<GazoVaultService.SimilarPair> similarSnapshot = new ArrayList<>(similar);
+                            List<Path> candidateSnapshot = sortPathsByImageAreaDesc(new ArrayList<>(candidates));
+                            Platform.runLater(() -> {
+                                similarRef.set(similarSnapshot);
+                                exactGroupsRef.set(exactSnapshot);
+                                reportArea.setText(buildDuplicateReport(exactSnapshot, similarSnapshot, threshold));
+                                candidateList.getItems().setAll(candidateSnapshot);
+                                Path pending = pendingSelectAfterDupScanRef.getAndSet(null);
+                                Path selected = candidateList.getSelectionModel().getSelectedItem();
+                                if (pending != null && candidateList.getItems().contains(pending)) {
+                                    candidateList.getSelectionModel().select(pending);
+                                    selected = pending;
+                                } else if (selected == null && !candidateSnapshot.isEmpty()) {
+                                    candidateList.getSelectionModel().select(0);
+                                    selected = candidateList.getSelectionModel().getSelectedItem();
+                                }
+                                selectedRef.set(selected);
+                                updateDuplicatePreview(selected, exactSnapshot, similarSnapshot, leftPreview, leftLabel, othersRow, othersHeaderLabel);
+                                refreshExactGroupKeepUi.run();
+                            });
+                        }
+                        updateMessage("重複チェック中: " + (i + 1) + " / " + total);
+                    }
+                    similar.sort(Comparator.comparingInt(GazoVaultService.SimilarPair::distance));
+                    List<List<Path>> exactFinal = new ArrayList<>(exact);
+                    List<GazoVaultService.SimilarPair> similarFinal = new ArrayList<>(similar);
+                    List<Path> finalCandidates = sortPathsByImageAreaDesc(new ArrayList<>(candidates));
+                    Platform.runLater(() -> {
+                        similarRef.set(similarFinal);
+                        exactGroupsRef.set(exactFinal);
+                        reportArea.setText(buildDuplicateReport(exactFinal, similarFinal, threshold));
+                        candidateList.getItems().setAll(finalCandidates);
+                        Path selected = candidateList.getSelectionModel().getSelectedItem();
+                        if (selected == null && !finalCandidates.isEmpty()) {
+                            candidateList.getSelectionModel().select(0);
+                            selected = candidateList.getSelectionModel().getSelectedItem();
+                        }
+                        selectedRef.set(selected);
+                        updateDuplicatePreview(selected, exactFinal, similarFinal, leftPreview, leftLabel, othersRow, othersHeaderLabel);
+                        refreshExactGroupKeepUi.run();
+                    });
+                    return null;
                 }
             };
+            busyLabel.textProperty().unbind();
+            busyLabel.textProperty().bind(task.messageProperty());
             task.setOnSucceeded(ev -> {
-                busyPane.setVisible(false);
-                busyPane.setManaged(false);
+                duplicateScanRunning.set(false);
+                busyLabel.textProperty().unbind();
+                scanStatusLabel.setText("重複チェック完了");
                 setDuplicateBusy.run();
-                DupScan result = task.getValue();
-                if (result == null) {
-                    return;
-                }
-                similarRef.set(result.similar());
-                exactGroupsRef.set(result.exact());
-                reportArea.setText(buildDuplicateReport(result.exact(), result.similar(), threshold));
-                candidateList.getItems().setAll(collectDuplicateCandidates(result.exact(), result.similar()));
-                Path pending = pendingSelectAfterDupScanRef.getAndSet(null);
-                Path selected = candidateList.getSelectionModel().getSelectedItem();
-                if (pending != null && candidateList.getItems().contains(pending)) {
-                    candidateList.getSelectionModel().select(pending);
-                    selected = pending;
-                }
-                selectedRef.set(selected);
-                updateDuplicatePreview(selected, result.exact(), result.similar(), leftPreview, leftLabel, othersRow, othersHeaderLabel);
-                refreshExactGroupKeepUi.run();
             });
             task.setOnFailed(ev -> {
-                busyPane.setVisible(false);
-                busyPane.setManaged(false);
+                duplicateScanRunning.set(false);
+                busyLabel.textProperty().unbind();
+                scanStatusLabel.setText("");
                 setDuplicateBusy.run();
                 Throwable ex = task.getException();
                 String msg = ex != null && ex.getMessage() != null ? ex.getMessage() : "不明なエラー";
@@ -1883,7 +2124,16 @@ public final class GazoApp extends Application {
                 for (Path p : toDelete) {
                     merged.addAll(vault.getTags(p));
                 }
-                vault.setTags(keep, merged);
+                TextInputDialog tagEditDialog = new TextInputDialog(String.join(", ", merged));
+                tagEditDialog.setTitle("統合タグの編集");
+                tagEditDialog.setHeaderText("残す画像に設定するタグを編集してください");
+                tagEditDialog.setContentText("タグ（カンマ区切り）:");
+                Optional<String> editedTagsOpt = tagEditDialog.showAndWait();
+                if (editedTagsOpt.isEmpty()) {
+                    return;
+                }
+                Set<String> finalTags = parseUserTags(editedTagsOpt.get());
+                vault.setTags(keep, finalTags);
                 for (Path p : toDelete) {
                     vault.deleteImage(p);
                 }
@@ -1898,12 +2148,12 @@ public final class GazoApp extends Application {
         });
 
         rerunButton.setOnAction(e -> refreshAsync.run());
-        deleteButton.setOnAction(e -> deleteDuplicateSelection(candidateList.getSelectionModel().getSelectedItem(), refreshAsync));
         tagButton.setOnAction(e -> addTagToDuplicateSelection(candidateList.getSelectionModel().getSelectedItem(), refreshAsync));
         candidateList.getSelectionModel().selectedItemProperty().addListener((obs, oldV, newV) -> {
             selectedRef.set(newV);
             updateDuplicatePreview(newV, exactGroupsRef.get(), similarRef.get(), leftPreview, leftLabel, othersRow, othersHeaderLabel);
             refreshExactGroupKeepUi.run();
+            setDuplicateBusy.run();
         });
         enlargeCompareButton.setOnAction(e -> showDuplicateExpandDialog(
                 selectedRef.get(),
@@ -2406,27 +2656,6 @@ public final class GazoApp extends Application {
         cap.setMaxWidth(340);
         cap.setStyle("-fx-font-size: 12px;");
         return new VBox(8, cap, iv);
-    }
-
-    private void deleteDuplicateSelection(Path selected, Runnable refresh) {
-        if (selected == null) {
-            GazoFx.showWarn("削除", "候補画像を選択してください。");
-            return;
-        }
-        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, selected.getFileName() + " を削除しますか？", ButtonType.OK, ButtonType.CANCEL);
-        confirm.setTitle("削除確認");
-        confirm.setHeaderText(null);
-        if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
-            return;
-        }
-        try {
-            vault.deleteImage(selected);
-            refreshTagFilterOptions();
-            refreshGallery();
-            refresh.run();
-        } catch (IOException e) {
-            GazoFx.showError("削除エラー", e.getMessage());
-        }
     }
 
     private void addTagToDuplicateSelection(Path selected, Runnable refresh) {
