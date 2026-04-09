@@ -106,6 +106,10 @@ public final class GazoApp extends Application {
     private FlowPane gallery;
     private FlowPane videoGallery;
     private Label vaultPathLabel;
+    /** インポート中のみファイル名を表示（通常は空） */
+    private Label importStatusLabel;
+    /** 画像タブツールバー: フィルター後の表示数と Vault 内の画像総数 */
+    private Label imageGalleryCountLabel;
     /** 絞り込みに使うタグ（正規化済み・小文字）。空なら「すべて表示」。複数指定時は AND（すべて含む）。 */
     private final LinkedHashSet<String> activeTagFilters = new LinkedHashSet<>();
     private MenuButton tagFilterMenuButton;
@@ -289,7 +293,17 @@ public final class GazoApp extends Application {
         clearImageSearchButton.setFocusTraversable(false);
         clearImageSearchButton.setStyle("-fx-font-weight: bold; -fx-padding: 2 8;");
         clearImageSearchButton.setOnAction(e -> imageSearchField.clear());
+        imageGalleryCountLabel = new Label("表示 0 / 全 0 枚");
+        imageGalleryCountLabel.setStyle("-fx-text-fill: #4a5560;");
+        Region imageToolbarSpacer = new Region();
+        HBox.setHgrow(imageToolbarSpacer, Priority.ALWAYS);
         vaultPathLabel = new Label();
+        vaultPathLabel.setMinWidth(0);
+        vaultPathLabel.setTextOverrun(OverrunStyle.ELLIPSIS);
+        importStatusLabel = new Label("");
+        importStatusLabel.setMinWidth(0);
+        importStatusLabel.setTextOverrun(OverrunStyle.ELLIPSIS);
+        importStatusLabel.setStyle("-fx-text-fill: #4a5560;");
         updateVaultPathLabel();
 
         HBox imageToolbar = new HBox(
@@ -306,7 +320,9 @@ public final class GazoApp extends Application {
                 imageSearchField,
                 clearImageSearchButton,
                 new Label("一覧サイズ:"),
-                listSizeCombo);
+                listSizeCombo,
+                imageToolbarSpacer,
+                imageGalleryCountLabel);
         imageToolbar.setAlignment(Pos.CENTER_LEFT);
         imageToolbar.setPadding(new Insets(10));
         imageToolbar.setStyle(
@@ -369,7 +385,9 @@ public final class GazoApp extends Application {
         // メニューバーをウィンドウ上端に密着させる。
         top.setStyle("-fx-background-color: transparent; -fx-border-color: #d7d0c2; -fx-border-width: 0 0 1 0;");
 
-        HBox statusBar = new HBox(vaultPathLabel);
+        Region statusBarSpacer = new Region();
+        HBox.setHgrow(statusBarSpacer, Priority.ALWAYS);
+        HBox statusBar = new HBox(12, vaultPathLabel, statusBarSpacer, importStatusLabel);
         statusBar.setAlignment(Pos.CENTER_LEFT);
         statusBar.setPadding(new Insets(6, 10, 6, 10));
         statusBar.setStyle("-fx-background-color: rgba(255,255,255,0.78); -fx-border-color: #d7d0c2; -fx-border-width: 1 0 0 0;");
@@ -635,6 +653,18 @@ public final class GazoApp extends Application {
         }
     }
 
+    private void setImportStatusLabel(String fileName) {
+        if (importStatusLabel != null) {
+            importStatusLabel.setText("インポート中: " + fileName);
+        }
+    }
+
+    private void clearImportStatusLabel() {
+        if (importStatusLabel != null) {
+            importStatusLabel.setText("");
+        }
+    }
+
     private void changeVaultPath(Stage stage) {
         DirectoryChooser chooser = new DirectoryChooser();
         chooser.setTitle("Vault の保存フォルダを選択");
@@ -698,12 +728,17 @@ public final class GazoApp extends Application {
         if (files == null || files.isEmpty()) {
             return;
         }
-        for (java.io.File f : files) {
-            try {
-                vault.importImage(f.toPath());
-            } catch (IOException e) {
-                GazoFx.showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
+        try {
+            for (java.io.File f : files) {
+                setImportStatusLabel(f.getName());
+                try {
+                    vault.importImage(f.toPath());
+                } catch (IOException e) {
+                    GazoFx.showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
+                }
             }
+        } finally {
+            clearImportStatusLabel();
         }
         refreshGallery();
     }
@@ -716,12 +751,17 @@ public final class GazoApp extends Application {
         if (files == null || files.isEmpty()) {
             return;
         }
-        for (java.io.File f : files) {
-            try {
-                vault.importVideo(f.toPath());
-            } catch (IOException e) {
-                GazoFx.showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
+        try {
+            for (java.io.File f : files) {
+                setImportStatusLabel(f.getName());
+                try {
+                    vault.importVideo(f.toPath());
+                } catch (IOException e) {
+                    GazoFx.showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
+                }
             }
+        } finally {
+            clearImportStatusLabel();
         }
         refreshTagFilterOptions();
         refreshVideoList();
@@ -765,10 +805,21 @@ public final class GazoApp extends Application {
         gallery.getChildren().clear();
         try {
             Map<String, Set<String>> tagMap = vault.tagsByFileName();
-            List<Path> paths = listFilteredImages(tagMap);
+            List<Path> allImages = vault.listImages();
+            List<Path> paths = listFilteredImages(tagMap, allImages);
+            updateImageGalleryCountLabel(paths.size(), allImages.size());
             scheduleGalleryCards(paths, tagMap, 0, 28);
         } catch (IOException e) {
+            if (imageGalleryCountLabel != null) {
+                imageGalleryCountLabel.setText("—");
+            }
             GazoFx.showError("読み込みエラー", e.getMessage());
+        }
+    }
+
+    private void updateImageGalleryCountLabel(int shown, int total) {
+        if (imageGalleryCountLabel != null) {
+            imageGalleryCountLabel.setText("表示 " + shown + " / 全 " + total + " 枚");
         }
     }
 
@@ -930,8 +981,12 @@ public final class GazoApp extends Application {
     }
 
     private List<Path> listFilteredImages(Map<String, Set<String>> tagsByFile) throws IOException {
+        return listFilteredImages(tagsByFile, vault.listImages());
+    }
+
+    private List<Path> listFilteredImages(Map<String, Set<String>> tagsByFile, List<Path> allImages) {
         List<Path> filtered = new ArrayList<>();
-        for (Path p : vault.listImages()) {
+        for (Path p : allImages) {
             Set<String> tags = tagsByFile.getOrDefault(p.getFileName().toString(), Set.of());
             if (!matchesTagFilter(tags)) {
                 continue;
@@ -1149,25 +1204,30 @@ public final class GazoApp extends Application {
 
     private boolean importDroppedFiles(List<java.io.File> files) {
         boolean importedAny = false;
-        for (java.io.File file : files) {
-            Path path = file.toPath();
-            if (Files.isDirectory(path)) {
-                importedAny |= importImagesFromDirectory(path);
-            } else if (isImageFile(path)) {
-                try {
-                    vault.importImage(path);
-                    importedAny = true;
-                } catch (IOException e) {
-                    GazoFx.showError("保存エラー", file.getName() + " の保存に失敗しました: " + e.getMessage());
-                }
-            } else if (isVideoFile(path)) {
-                try {
-                    vault.importVideo(path);
-                    importedAny = true;
-                } catch (IOException e) {
-                    GazoFx.showError("保存エラー", file.getName() + " の保存に失敗しました: " + e.getMessage());
+        try {
+            for (java.io.File file : files) {
+                setImportStatusLabel(file.getName());
+                Path path = file.toPath();
+                if (Files.isDirectory(path)) {
+                    importedAny |= importImagesFromDirectory(path);
+                } else if (isImageFile(path)) {
+                    try {
+                        vault.importImage(path);
+                        importedAny = true;
+                    } catch (IOException e) {
+                        GazoFx.showError("保存エラー", file.getName() + " の保存に失敗しました: " + e.getMessage());
+                    }
+                } else if (isVideoFile(path)) {
+                    try {
+                        vault.importVideo(path);
+                        importedAny = true;
+                    } catch (IOException e) {
+                        GazoFx.showError("保存エラー", file.getName() + " の保存に失敗しました: " + e.getMessage());
+                    }
                 }
             }
+        } finally {
+            clearImportStatusLabel();
         }
         if (importedAny) {
             refreshTagFilterOptions();
@@ -1197,23 +1257,29 @@ public final class GazoApp extends Application {
                     .filter(Files::isRegularFile)
                     .filter(p -> isImageFile(p) || isVideoFile(p))
                     .toList();
-            for (Path file : files) {
-                try {
-                    Path importedPath;
-                    if (isImageFile(file)) {
-                        importedPath = vault.importImage(file);
-                    } else {
-                        importedPath = vault.importVideo(file);
+            try {
+                for (Path file : files) {
+                    String name = file.getFileName() == null ? file.toString() : file.getFileName().toString();
+                    setImportStatusLabel(name);
+                    try {
+                        Path importedPath;
+                        if (isImageFile(file)) {
+                            importedPath = vault.importImage(file);
+                        } else {
+                            importedPath = vault.importVideo(file);
+                        }
+                        importedAny = true;
+                        if (!folderTag.isBlank()) {
+                            Set<String> tags = new LinkedHashSet<>(vault.getTags(importedPath));
+                            tags.add(folderTag);
+                            vault.setTags(importedPath, tags);
+                        }
+                    } catch (IOException e) {
+                        GazoFx.showError("保存エラー", file.getFileName() + " の保存に失敗しました: " + e.getMessage());
                     }
-                    importedAny = true;
-                    if (!folderTag.isBlank()) {
-                        Set<String> tags = new LinkedHashSet<>(vault.getTags(importedPath));
-                        tags.add(folderTag);
-                        vault.setTags(importedPath, tags);
-                    }
-                } catch (IOException e) {
-                    GazoFx.showError("保存エラー", file.getFileName() + " の保存に失敗しました: " + e.getMessage());
                 }
+            } finally {
+                clearImportStatusLabel();
             }
         } catch (IOException e) {
             GazoFx.showError("フォルダー読み込みエラー", directory.getFileName() + " の読み込みに失敗しました: " + e.getMessage());
