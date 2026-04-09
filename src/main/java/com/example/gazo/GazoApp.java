@@ -130,6 +130,7 @@ public final class GazoApp extends Application {
     private boolean updatingTagFilterSelection;
     private MenuButton displayOptionsMenuButton;
     private ListView<String> displayOptionsListView;
+    private TextField imageSearchField;
     private final Map<String, BooleanProperty> displayOptionSelectionMap = new java.util.LinkedHashMap<>();
     private boolean updatingDisplayOptionSelection;
     private boolean showFileName = true;
@@ -170,6 +171,19 @@ public final class GazoApp extends Application {
         }));
 
         primaryStage = stage;
+
+        VaultPathStore.GallerySettings gallerySettings = VaultPathStore.loadGallerySettings();
+        activeTagFilters.clear();
+        activeTagFilters.addAll(gallerySettings.tagFilters());
+        showFileName = gallerySettings.showFileName();
+        showDate = gallerySettings.showDate();
+        showTags = gallerySettings.showTags();
+        listViewSize = gallerySettings.listViewSize();
+        if (!LIST_VIEW_SIZE_OPTIONS.contains(listViewSize)) {
+            listViewSize = "中";
+        }
+        String loadedSearch = gallerySettings.imageNameQuery() == null ? "" : gallerySettings.imageNameQuery();
+        imageNameQuery = loadedSearch.trim().toLowerCase();
 
         gallery = new FlowPane();
         gallery.setHgap(16);
@@ -267,6 +281,7 @@ public final class GazoApp extends Application {
             refreshGallery();
             refreshVideoList();
             updateTagFilterButtonText();
+            persistGallerySettings();
         });
         displayOptionsListView = new ListView<>();
         displayOptionsListView.setPrefWidth(170);
@@ -278,9 +293,9 @@ public final class GazoApp extends Application {
         displayOptionsMenuButton.getItems().setAll(displayOptionsMenuItem);
         updatingDisplayOptionSelection = true;
         try {
-            displayOptionProperty("ファイル名").set(true);
-            displayOptionProperty("日付").set(true);
-            displayOptionProperty("タグ").set(true);
+            displayOptionProperty("ファイル名").set(showFileName);
+            displayOptionProperty("日付").set(showDate);
+            displayOptionProperty("タグ").set(showTags);
         } finally {
             updatingDisplayOptionSelection = false;
         }
@@ -292,13 +307,16 @@ public final class GazoApp extends Application {
             String selected = listSizeCombo.getValue();
             listViewSize = selected == null ? "中" : selected;
             refreshGallery();
+            persistGallerySettings();
         });
-        TextField imageSearchField = new TextField();
+        imageSearchField = new TextField();
         imageSearchField.setPromptText("ファイル名検索");
         imageSearchField.setPrefWidth(180);
+        imageSearchField.setText(loadedSearch);
         imageSearchField.textProperty().addListener((obs, oldV, newV) -> {
             imageNameQuery = newV == null ? "" : newV.trim().toLowerCase();
             refreshGallery();
+            persistGallerySettings();
         });
         Button clearImageSearchButton = new Button("×");
         clearImageSearchButton.setTooltip(new Tooltip("ファイル名検索をクリア"));
@@ -1060,6 +1078,7 @@ public final class GazoApp extends Application {
         refreshGallery();
         refreshVideoList();
         updateTagFilterButtonText();
+        persistGallerySettings();
     }
 
     private void updateTagFilterButtonText() {
@@ -1094,6 +1113,18 @@ public final class GazoApp extends Application {
         showTags = tagProp != null && tagProp.get();
         updateDisplayOptionsButtonText();
         refreshGallery();
+        persistGallerySettings();
+    }
+
+    private void persistGallerySettings() {
+        String searchRaw = imageSearchField == null ? "" : imageSearchField.getText();
+        VaultPathStore.saveGallerySettings(new VaultPathStore.GallerySettings(
+                showFileName,
+                showDate,
+                showTags,
+                listViewSize,
+                searchRaw,
+                new ArrayList<>(activeTagFilters)));
     }
 
     private void updateDisplayOptionsButtonText() {
@@ -1130,6 +1161,7 @@ public final class GazoApp extends Application {
         }
         updateDisplayOptionsButtonText();
         refreshGallery();
+        persistGallerySettings();
     }
 
     /**
@@ -1199,6 +1231,7 @@ public final class GazoApp extends Application {
                 updatingTagFilterSelection = false;
             }
             updateTagFilterButtonText();
+            persistGallerySettings();
         } catch (IOException e) {
             GazoFx.showError("タグ読み込みエラー", e.getMessage());
         }
