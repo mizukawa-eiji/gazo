@@ -40,6 +40,9 @@ import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.OverrunStyle;
+import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.RadioButton;
+import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.cell.CheckBoxListCell;
 import javafx.scene.Group;
 import javafx.scene.image.Image;
@@ -85,16 +88,18 @@ import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Deque;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -107,6 +112,9 @@ public final class GazoApp extends Application {
     private static final double BASE_CANVAS_HEIGHT = 1400.0;
     GazoVaultService vault;
     private Stage primaryStage;
+    /** メインウィンドウに重ねる処理中オーバーレイ（サムネイル再作成など） */
+    private StackPane appBusyPane;
+    private Label appBusyMessageLabel;
     private FlowPane gallery;
     private FlowPane videoGallery;
     private Label vaultPathLabel;
@@ -401,14 +409,28 @@ public final class GazoApp extends Application {
         root.setCenter(mainTabs);
         root.setBottom(statusBar);
 
-        Scene scene = new Scene(root, 920, 680);
+        appBusyPane = new StackPane();
+        Region appBusyBg = new Region();
+        appBusyBg.setStyle("-fx-background-color: rgba(255,255,255,0.82);");
+        ProgressIndicator appBusySpinner = new ProgressIndicator();
+        appBusySpinner.setPrefSize(44, 44);
+        appBusyMessageLabel = new Label("処理中…");
+        appBusyMessageLabel.setStyle("-fx-font-size: 13px;");
+        VBox appBusyCenter = new VBox(10, appBusySpinner, appBusyMessageLabel);
+        appBusyCenter.setAlignment(Pos.CENTER);
+        appBusyPane.getChildren().addAll(appBusyBg, appBusyCenter);
+        appBusyPane.setVisible(false);
+        appBusyPane.setManaged(false);
+        StackPane rootStack = new StackPane(root, appBusyPane);
+
+        Scene scene = new Scene(rootStack, 920, 680);
         stage.setTitle("Gazo — 暗号化フォルダに保存する写真ビューア (JavaFX)");
         GazoFx.applyAppIcons(stage);
         stage.setScene(scene);
         stage.setResizable(true);
         stage.show();
 
-        enableImageDragAndDrop(root);
+        enableImageDragAndDrop(rootStack);
         refreshTagFilterOptions();
         refreshGallery();
         refreshVideoList();
@@ -771,6 +793,16 @@ public final class GazoApp extends Application {
         refreshVideoList();
     }
 
+    private void setMainWindowBusy(boolean busy, String message) {
+        if (appBusyMessageLabel != null) {
+            appBusyMessageLabel.setText(message != null && !message.isBlank() ? message : "処理中…");
+        }
+        if (appBusyPane != null) {
+            appBusyPane.setVisible(busy);
+            appBusyPane.setManaged(busy);
+        }
+    }
+
     private void rebuildAllThumbnails() {
         Alert confirm = new Alert(
                 Alert.AlertType.CONFIRMATION,
@@ -784,6 +816,8 @@ public final class GazoApp extends Application {
             return;
         }
 
+        setMainWindowBusy(true, "サムネイルを再作成しています…");
+
         Task<Integer> task = new Task<>() {
             @Override
             protected Integer call() throws Exception {
@@ -791,11 +825,13 @@ public final class GazoApp extends Application {
             }
         };
         task.setOnSucceeded(e -> {
+            setMainWindowBusy(false, "");
             Integer count = task.getValue();
             GazoFx.showWarn("サムネイル再作成", (count == null ? 0 : count) + " 件を再作成しました。");
             refreshGallery();
         });
         task.setOnFailed(e -> {
+            setMainWindowBusy(false, "");
             Throwable ex = task.getException();
             GazoFx.showError("サムネイル再作成エラー", ex != null ? ex.getMessage() : "不明なエラー");
         });
@@ -1168,7 +1204,7 @@ public final class GazoApp extends Application {
         }
     }
 
-    private void enableImageDragAndDrop(BorderPane dropTarget) {
+    private void enableImageDragAndDrop(Node dropTarget) {
         dropTarget.setOnDragOver(event -> {
             if (event.getGestureSource() != dropTarget && event.getDragboard().hasFiles() && hasImportableEntries(event.getDragboard().getFiles())) {
                 event.acceptTransferModes(TransferMode.COPY);
@@ -1595,85 +1631,252 @@ public final class GazoApp extends Application {
         leftPreview.setFitWidth(220);
         leftPreview.setFitHeight(220);
         leftPreview.setPreserveRatio(true);
-        ImageView rightPreview = new ImageView();
-        rightPreview.setFitWidth(220);
-        rightPreview.setFitHeight(220);
-        rightPreview.setPreserveRatio(true);
         Label leftLabel = new Label("選択画像");
-        Label rightLabel = new Label("比較候補");
+        Label othersHeaderLabel = new Label("重複・類似候補");
+        HBox othersRow = new HBox(10);
+        othersRow.setAlignment(Pos.CENTER_LEFT);
+        ScrollPane othersScroll = new ScrollPane(othersRow);
+        othersScroll.setFitToHeight(true);
+        othersScroll.setMinHeight(200);
+        othersScroll.setPrefHeight(240);
+        othersScroll.setMaxHeight(300);
+        othersScroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        othersScroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
         VBox leftBox = new VBox(6, leftLabel, leftPreview);
-        VBox rightBox = new VBox(6, rightLabel, rightPreview);
+        VBox rightBox = new VBox(6, othersHeaderLabel, othersScroll);
+        rightBox.setPrefWidth(520);
         HBox previewBox = new HBox(16, leftBox, rightBox);
-        previewBox.setAlignment(Pos.CENTER_LEFT);
-        Button prevCandidateButton = new Button("前候補");
-        Button nextCandidateButton = new Button("次候補");
-        Button enlargeCompareButton = new Button("2枚拡大比較");
-        HBox previewControls = new HBox(8, prevCandidateButton, nextCandidateButton, enlargeCompareButton);
+        previewBox.setAlignment(Pos.TOP_LEFT);
+        Button enlargeCompareButton = new Button("一覧を拡大表示");
+        HBox previewControls = new HBox(8, enlargeCompareButton);
         previewControls.setAlignment(Pos.CENTER_LEFT);
+
+        Label exactDupSectionTitle = new Label("同一画像（SHA-256一致）の整理");
+        exactDupSectionTitle.setStyle("-fx-font-weight: bold;");
+        Label exactDupHint = new Label("グループ内で残す画像を選び、他を削除します。削除した画像のタグは残す画像に追加されます。");
+        exactDupHint.setWrapText(true);
+        exactDupHint.setMaxWidth(720);
+        VBox exactRadioList = new VBox(4);
+        ScrollPane exactRadioScroll = new ScrollPane(exactRadioList);
+        exactRadioScroll.setFitToWidth(true);
+        exactRadioScroll.setMaxHeight(140);
+        exactRadioScroll.setMinHeight(Region.USE_PREF_SIZE);
+        Button mergeDeleteExactButton = new Button("選択した画像以外を削除（タグを統合）");
+        mergeDeleteExactButton.setDisable(true);
+        VBox exactDupBox = new VBox(6, exactDupSectionTitle, exactDupHint, exactRadioScroll, mergeDeleteExactButton);
+        exactDupBox.setVisible(false);
+        exactDupBox.setManaged(false);
+        AtomicReference<ToggleGroup> exactKeepToggleGroupRef = new AtomicReference<>(new ToggleGroup());
 
         Button deleteButton = new Button("選択削除");
         Button tagButton = new Button("選択にタグ付与");
         AtomicReference<List<GazoVaultService.SimilarPair>> similarRef = new AtomicReference<>(List.of());
+        AtomicReference<List<List<Path>>> exactGroupsRef = new AtomicReference<>(List.of());
         AtomicReference<Path> selectedRef = new AtomicReference<>(null);
-        AtomicReference<List<GazoVaultService.SimilarPair>> selectedPairOptionsRef = new AtomicReference<>(List.of());
-        AtomicInteger selectedPairIndexRef = new AtomicInteger(0);
-
-        Runnable refresh = () -> {
-            int threshold = parseThreshold(thresholdField.getText(), 8);
-            try {
-                var exact = vault.findExactDuplicateGroups();
-                var similar = vault.findSimilarPairs(threshold);
-                similarRef.set(similar);
-                reportArea.setText(buildDuplicateReport(exact, similar, threshold));
-                candidateList.getItems().setAll(collectDuplicateCandidates(exact, similar));
-                Path selected = candidateList.getSelectionModel().getSelectedItem();
-                selectedRef.set(selected);
-                selectedPairOptionsRef.set(findPairsForSelection(selected, similar));
-                selectedPairIndexRef.set(0);
-                updateDuplicatePreview(selected, selectedPairOptionsRef.get(), selectedPairIndexRef.get(), leftPreview, rightPreview, leftLabel, rightLabel);
-            } catch (IOException e) {
-                GazoFx.showError("重複チェックエラー", e.getMessage());
-            }
-        };
-
-        rerunButton.setOnAction(e -> refresh.run());
-        deleteButton.setOnAction(e -> deleteDuplicateSelection(candidateList.getSelectionModel().getSelectedItem(), refresh));
-        tagButton.setOnAction(e -> addTagToDuplicateSelection(candidateList.getSelectionModel().getSelectedItem(), refresh));
-        candidateList.getSelectionModel().selectedItemProperty().addListener((obs, oldV, newV) -> {
-            selectedRef.set(newV);
-            selectedPairOptionsRef.set(findPairsForSelection(newV, similarRef.get()));
-            selectedPairIndexRef.set(0);
-            updateDuplicatePreview(newV, selectedPairOptionsRef.get(), selectedPairIndexRef.get(), leftPreview, rightPreview, leftLabel, rightLabel);
-        });
-        prevCandidateButton.setOnAction(e -> {
-            List<GazoVaultService.SimilarPair> options = selectedPairOptionsRef.get();
-            if (options.isEmpty()) {
-                return;
-            }
-            int current = selectedPairIndexRef.get();
-            int next = (current - 1 + options.size()) % options.size();
-            selectedPairIndexRef.set(next);
-            updateDuplicatePreview(selectedRef.get(), options, next, leftPreview, rightPreview, leftLabel, rightLabel);
-        });
-        nextCandidateButton.setOnAction(e -> {
-            List<GazoVaultService.SimilarPair> options = selectedPairOptionsRef.get();
-            if (options.isEmpty()) {
-                return;
-            }
-            int current = selectedPairIndexRef.get();
-            int next = (current + 1) % options.size();
-            selectedPairIndexRef.set(next);
-            updateDuplicatePreview(selectedRef.get(), options, next, leftPreview, rightPreview, leftLabel, rightLabel);
-        });
-        enlargeCompareButton.setOnAction(e -> showLargeCompareDialog(selectedRef.get(), selectedPairOptionsRef.get(), selectedPairIndexRef.get()));
 
         HBox controls = new HBox(8, new Label("類似判定距離:"), thresholdField, rerunButton, deleteButton, tagButton);
         controls.setAlignment(Pos.CENTER_LEFT);
-        VBox content = new VBox(8, controls, new Label("候補画像:"), candidateList, previewBox, previewControls, reportArea);
+        VBox content = new VBox(
+                8,
+                controls,
+                new Label("候補画像:"),
+                candidateList,
+                previewBox,
+                previewControls,
+                exactDupBox,
+                reportArea);
         content.setPadding(new Insets(10));
-        dialog.getDialogPane().setContent(content);
 
-        refresh.run();
+        StackPane busyPane = new StackPane();
+        Region busyBg = new Region();
+        busyBg.setStyle("-fx-background-color: rgba(255,255,255,0.82);");
+        ProgressIndicator busySpinner = new ProgressIndicator();
+        busySpinner.setPrefSize(44, 44);
+        Label busyLabel = new Label("重複を検索しています…");
+        busyLabel.setStyle("-fx-font-size: 13px;");
+        VBox busyCenter = new VBox(10, busySpinner, busyLabel);
+        busyCenter.setAlignment(Pos.CENTER);
+        busyPane.getChildren().addAll(busyBg, busyCenter);
+        busyPane.setVisible(false);
+        busyPane.setManaged(false);
+
+        StackPane rootStack = new StackPane(content, busyPane);
+        dialog.getDialogPane().setContent(rootStack);
+
+        Runnable setDuplicateBusy = () -> {
+            boolean busy = busyPane.isVisible();
+            rerunButton.setDisable(busy);
+            thresholdField.setDisable(busy);
+            deleteButton.setDisable(busy);
+            tagButton.setDisable(busy);
+            candidateList.setDisable(busy);
+            enlargeCompareButton.setDisable(busy);
+            if (busy) {
+                mergeDeleteExactButton.setDisable(true);
+            }
+            javafx.scene.Node closeBtn = dialog.getDialogPane().lookupButton(ButtonType.CLOSE);
+            if (closeBtn != null) {
+                closeBtn.setDisable(busy);
+            }
+        };
+
+        AtomicReference<Path> pendingSelectAfterDupScanRef = new AtomicReference<>(null);
+
+        Runnable refreshExactGroupKeepUi = () -> {
+            exactRadioList.getChildren().clear();
+            ToggleGroup tg = new ToggleGroup();
+            exactKeepToggleGroupRef.set(tg);
+            Path sel = selectedRef.get();
+            List<List<Path>> eg = exactGroupsRef.get();
+            if (sel == null || eg == null) {
+                exactDupBox.setVisible(false);
+                exactDupBox.setManaged(false);
+                mergeDeleteExactButton.setDisable(true);
+                return;
+            }
+            Optional<List<Path>> gOpt = findExactGroupContaining(sel, eg);
+            if (gOpt.isEmpty() || gOpt.get().size() < 2) {
+                exactDupBox.setVisible(false);
+                exactDupBox.setManaged(false);
+                mergeDeleteExactButton.setDisable(true);
+                return;
+            }
+            List<Path> group = sortPathsByImageAreaDesc(gOpt.get());
+            exactDupBox.setVisible(true);
+            exactDupBox.setManaged(true);
+            mergeDeleteExactButton.setDisable(false);
+            boolean matched = false;
+            for (Path p : group) {
+                RadioButton rb = new RadioButton(p.getFileName().toString() + "  " + formatImagePixelSize(p));
+                rb.setUserData(p);
+                rb.setToggleGroup(tg);
+                exactRadioList.getChildren().add(rb);
+            }
+            for (Node n : exactRadioList.getChildren()) {
+                if (n instanceof RadioButton rb && sel.equals(rb.getUserData())) {
+                    rb.setSelected(true);
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched && !exactRadioList.getChildren().isEmpty()) {
+                ((RadioButton) exactRadioList.getChildren().get(0)).setSelected(true);
+            }
+        };
+
+        Runnable refreshAsync = () -> {
+            int threshold = parseThreshold(thresholdField.getText(), 8);
+            busyPane.setVisible(true);
+            busyPane.setManaged(true);
+            setDuplicateBusy.run();
+
+            record DupScan(List<List<Path>> exact, List<GazoVaultService.SimilarPair> similar) {}
+
+            Task<DupScan> task = new Task<>() {
+                @Override
+                protected DupScan call() throws IOException {
+                    List<List<Path>> exact = vault.findExactDuplicateGroups();
+                    List<GazoVaultService.SimilarPair> similar = vault.findSimilarPairs(threshold);
+                    return new DupScan(exact, similar);
+                }
+            };
+            task.setOnSucceeded(ev -> {
+                busyPane.setVisible(false);
+                busyPane.setManaged(false);
+                setDuplicateBusy.run();
+                DupScan result = task.getValue();
+                if (result == null) {
+                    return;
+                }
+                similarRef.set(result.similar());
+                exactGroupsRef.set(result.exact());
+                reportArea.setText(buildDuplicateReport(result.exact(), result.similar(), threshold));
+                candidateList.getItems().setAll(collectDuplicateCandidates(result.exact(), result.similar()));
+                Path pending = pendingSelectAfterDupScanRef.getAndSet(null);
+                Path selected = candidateList.getSelectionModel().getSelectedItem();
+                if (pending != null && candidateList.getItems().contains(pending)) {
+                    candidateList.getSelectionModel().select(pending);
+                    selected = pending;
+                }
+                selectedRef.set(selected);
+                updateDuplicatePreview(selected, result.exact(), result.similar(), leftPreview, leftLabel, othersRow, othersHeaderLabel);
+                refreshExactGroupKeepUi.run();
+            });
+            task.setOnFailed(ev -> {
+                busyPane.setVisible(false);
+                busyPane.setManaged(false);
+                setDuplicateBusy.run();
+                Throwable ex = task.getException();
+                String msg = ex != null && ex.getMessage() != null ? ex.getMessage() : "不明なエラー";
+                GazoFx.showError("重複チェックエラー", msg);
+            });
+            Thread t = new Thread(task, "gazo-duplicate-scan");
+            t.setDaemon(true);
+            t.start();
+        };
+
+        mergeDeleteExactButton.setOnAction(e -> {
+            ToggleGroup tg = exactKeepToggleGroupRef.get();
+            javafx.scene.control.Toggle t = tg.getSelectedToggle();
+            if (!(t instanceof RadioButton rb)) {
+                return;
+            }
+            Path keep = (Path) rb.getUserData();
+            List<List<Path>> eg = exactGroupsRef.get();
+            Optional<List<Path>> gOpt = findExactGroupContaining(keep, eg);
+            if (gOpt.isEmpty() || gOpt.get().size() < 2) {
+                return;
+            }
+            List<Path> group = gOpt.get();
+            List<Path> toDelete = group.stream().filter(p -> !p.equals(keep)).toList();
+            StringBuilder sb = new StringBuilder();
+            sb.append("残す: ").append(keep.getFileName());
+            sb.append("\n削除 ").append(toDelete.size()).append(" 件: ");
+            for (int i = 0; i < toDelete.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append(toDelete.get(i).getFileName());
+            }
+            sb.append("\n削除した画像のタグは、残す画像に追加されます。");
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION, sb.toString(), ButtonType.OK, ButtonType.CANCEL);
+            confirm.setTitle("重複削除の確認");
+            confirm.setHeaderText(null);
+            if (confirm.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) {
+                return;
+            }
+            try {
+                LinkedHashSet<String> merged = new LinkedHashSet<>(vault.getTags(keep));
+                for (Path p : toDelete) {
+                    merged.addAll(vault.getTags(p));
+                }
+                vault.setTags(keep, merged);
+                for (Path p : toDelete) {
+                    vault.deleteImage(p);
+                }
+                refreshTagFilterOptions();
+                refreshGallery();
+                refreshVideoList();
+                pendingSelectAfterDupScanRef.set(keep);
+                refreshAsync.run();
+            } catch (IOException ex) {
+                GazoFx.showError("重複削除エラー", ex.getMessage());
+            }
+        });
+
+        rerunButton.setOnAction(e -> refreshAsync.run());
+        deleteButton.setOnAction(e -> deleteDuplicateSelection(candidateList.getSelectionModel().getSelectedItem(), refreshAsync));
+        tagButton.setOnAction(e -> addTagToDuplicateSelection(candidateList.getSelectionModel().getSelectedItem(), refreshAsync));
+        candidateList.getSelectionModel().selectedItemProperty().addListener((obs, oldV, newV) -> {
+            selectedRef.set(newV);
+            updateDuplicatePreview(newV, exactGroupsRef.get(), similarRef.get(), leftPreview, leftLabel, othersRow, othersHeaderLabel);
+            refreshExactGroupKeepUi.run();
+        });
+        enlargeCompareButton.setOnAction(e -> showDuplicateExpandDialog(
+                selectedRef.get(),
+                duplicateOthersOrdered(selectedRef.get(), exactGroupsRef.get(), similarRef.get())));
+
+        refreshAsync.run();
         dialog.showAndWait();
     }
 
@@ -1698,7 +1901,7 @@ public final class GazoApp extends Application {
             int group = 1;
             for (List<Path> paths : exact) {
                 report.append("グループ ").append(group++).append(":\n");
-                for (Path p : paths) {
+                for (Path p : sortPathsByImageAreaDesc(paths)) {
                     report.append("  - ")
                             .append(p.getFileName())
                             .append("  ")
@@ -1711,7 +1914,13 @@ public final class GazoApp extends Application {
         if (similar.isEmpty()) {
             report.append("なし\n");
         } else {
-            for (GazoVaultService.SimilarPair pair : similar) {
+            List<GazoVaultService.SimilarPair> pairsBySize = new ArrayList<>(similar);
+            pairsBySize.sort(Comparator.comparingLong(
+                            (GazoVaultService.SimilarPair pair) -> Math.max(imagePixelArea(pair.left()), imagePixelArea(pair.right())))
+                    .reversed()
+                    .thenComparingInt(GazoVaultService.SimilarPair::distance)
+                    .thenComparing(p -> p.left().getFileName().toString(), String.CASE_INSENSITIVE_ORDER));
+            for (GazoVaultService.SimilarPair pair : pairsBySize) {
                 report.append("  - ")
                         .append(pair.left().getFileName())
                         .append(" ")
@@ -1728,8 +1937,8 @@ public final class GazoApp extends Application {
         return report.toString();
     }
 
-    /** 画像のピクセル幅×高さ。読み取れない場合は "—"。 */
-    private String formatImagePixelSize(Path path) {
+    /** ピクセル幅・高さ。読み取れないときは null。 */
+    private int[] readImagePixelDimensions(Path path) {
         try (InputStream in = Files.newInputStream(path)) {
             ImageInputStream iis = ImageIO.createImageInputStream(in);
             if (iis != null) {
@@ -1741,7 +1950,7 @@ public final class GazoApp extends Application {
                             reader.setInput(iis);
                             int w = reader.getWidth(0);
                             int h = reader.getHeight(0);
-                            return w + "×" + h;
+                            return new int[]{w, h};
                         } finally {
                             reader.dispose();
                         }
@@ -1756,24 +1965,100 @@ public final class GazoApp extends Application {
         try (InputStream in = Files.newInputStream(path)) {
             Image img = new Image(in);
             if (img.isError() || img.getWidth() <= 0 || img.getHeight() <= 0) {
-                return "—";
+                return null;
             }
-            return (int) Math.round(img.getWidth()) + "×" + (int) Math.round(img.getHeight());
+            return new int[]{(int) Math.round(img.getWidth()), (int) Math.round(img.getHeight())};
         } catch (IOException e) {
-            return "—";
+            return null;
         }
     }
 
+    /** 画像のピクセル幅×高さ。読み取れない場合は "—"。 */
+    private String formatImagePixelSize(Path path) {
+        int[] d = readImagePixelDimensions(path);
+        if (d == null) {
+            return "—";
+        }
+        return d[0] + "×" + d[1];
+    }
+
+    private long imagePixelArea(Path path) {
+        int[] d = readImagePixelDimensions(path);
+        if (d == null) {
+            return 0L;
+        }
+        return (long) d[0] * (long) d[1];
+    }
+
+    private List<Path> sortPathsByImageAreaDesc(List<Path> paths) {
+        List<Path> copy = new ArrayList<>(paths);
+        copy.sort(Comparator.comparingLong(this::imagePixelArea)
+                .reversed()
+                .thenComparing(p -> p.getFileName().toString(), String.CASE_INSENSITIVE_ORDER));
+        return copy;
+    }
+
+    private Optional<List<Path>> findExactGroupContaining(Path path, List<List<Path>> exactGroups) {
+        if (path == null || exactGroups == null) {
+            return Optional.empty();
+        }
+        for (List<Path> g : exactGroups) {
+            if (g.contains(path)) {
+                return Optional.of(g);
+            }
+        }
+        return Optional.empty();
+    }
+
     private List<Path> collectDuplicateCandidates(List<List<Path>> exact, List<GazoVaultService.SimilarPair> similar) {
-        Set<Path> candidates = new TreeSet<>(Comparator.comparing(p -> p.getFileName().toString()));
+        // 同一SHAグループと類似ペアを1つの無向グラフとして扱い、
+        // 連結成分（重複クラスタ）ごとに代表1件だけ候補リストへ出す。
+        Map<Path, Set<Path>> graph = new HashMap<>();
         for (List<Path> group : exact) {
-            candidates.addAll(group);
+            List<Path> paths = group == null ? List.of() : group;
+            if (paths.isEmpty()) {
+                continue;
+            }
+            for (Path p : paths) {
+                graph.computeIfAbsent(p, k -> new LinkedHashSet<>());
+            }
+            // 完全グラフは作らず、先頭ノードへのスター接続で連結性だけ担保する。
+            Path anchor = paths.get(0);
+            for (int i = 1; i < paths.size(); i++) {
+                Path p = paths.get(i);
+                graph.get(anchor).add(p);
+                graph.get(p).add(anchor);
+            }
         }
         for (GazoVaultService.SimilarPair pair : similar) {
-            candidates.add(pair.left());
-            candidates.add(pair.right());
+            if (pair == null || pair.left() == null || pair.right() == null) {
+                continue;
+            }
+            graph.computeIfAbsent(pair.left(), k -> new LinkedHashSet<>()).add(pair.right());
+            graph.computeIfAbsent(pair.right(), k -> new LinkedHashSet<>()).add(pair.left());
         }
-        return new ArrayList<>(candidates);
+
+        Set<Path> visited = new LinkedHashSet<>();
+        List<Path> representatives = new ArrayList<>();
+        for (Path start : graph.keySet()) {
+            if (!visited.add(start)) {
+                continue;
+            }
+            List<Path> component = new ArrayList<>();
+            Deque<Path> stack = new ArrayDeque<>();
+            stack.push(start);
+            while (!stack.isEmpty()) {
+                Path cur = stack.pop();
+                component.add(cur);
+                for (Path next : graph.getOrDefault(cur, Set.of())) {
+                    if (visited.add(next)) {
+                        stack.push(next);
+                    }
+                }
+            }
+            representatives.add(sortPathsByImageAreaDesc(component).get(0));
+        }
+        return sortPathsByImageAreaDesc(representatives);
     }
 
     private Image loadThumbnail(Path path, int width, int height) {
@@ -1966,79 +2251,128 @@ public final class GazoApp extends Application {
         stage.show();
     }
 
-    private List<GazoVaultService.SimilarPair> findPairsForSelection(Path selected, List<GazoVaultService.SimilarPair> similarPairs) {
+    /** 重複チェック: 同一SHAグループは距離0、類似のみは dHash 距離の最小値。 */
+    private record DuplicateOther(Path path, int distance) {}
+
+    private List<DuplicateOther> duplicateOthersOrdered(
+            Path selected,
+            List<List<Path>> exactGroups,
+            List<GazoVaultService.SimilarPair> similarPairs) {
         if (selected == null) {
             return List.of();
         }
-        List<GazoVaultService.SimilarPair> options = new ArrayList<>();
-        for (GazoVaultService.SimilarPair pair : similarPairs) {
-            if (pair.left().equals(selected) || pair.right().equals(selected)) {
-                options.add(pair);
+        for (List<Path> g : exactGroups) {
+            if (g.contains(selected)) {
+                List<Path> others = g.stream().filter(p -> !p.equals(selected)).toList();
+                return sortPathsByImageAreaDesc(others).stream().map(p -> new DuplicateOther(p, 0)).toList();
             }
         }
-        options.sort(Comparator.comparingInt(GazoVaultService.SimilarPair::distance));
-        return options;
+        Map<Path, Integer> minDist = new HashMap<>();
+        for (GazoVaultService.SimilarPair pair : similarPairs) {
+            if (pair.left().equals(selected)) {
+                minDist.merge(pair.right(), pair.distance(), Math::min);
+            } else if (pair.right().equals(selected)) {
+                minDist.merge(pair.left(), pair.distance(), Math::min);
+            }
+        }
+        return minDist.entrySet().stream()
+                .sorted(Comparator.comparingLong((Map.Entry<Path, Integer> e) -> imagePixelArea(e.getKey()))
+                        .reversed()
+                        .thenComparingInt(Map.Entry::getValue)
+                        .thenComparing(e -> e.getKey().getFileName().toString(), String.CASE_INSENSITIVE_ORDER))
+                .map(e -> new DuplicateOther(e.getKey(), e.getValue()))
+                .toList();
     }
 
     private void updateDuplicatePreview(
             Path selected,
-            List<GazoVaultService.SimilarPair> selectedPairs,
-            int selectedPairIndex,
+            List<List<Path>> exactGroups,
+            List<GazoVaultService.SimilarPair> allSimilarPairs,
             ImageView leftPreview,
-            ImageView rightPreview,
             Label leftLabel,
-            Label rightLabel) {
+            HBox othersRow,
+            Label othersHeaderLabel) {
+        othersRow.getChildren().clear();
         if (selected == null) {
             leftPreview.setImage(null);
-            rightPreview.setImage(null);
             leftLabel.setText("選択画像");
-            rightLabel.setText("比較候補");
+            othersHeaderLabel.setText("重複・類似候補");
             return;
         }
         leftPreview.setImage(loadThumbnail(selected, 220, 220));
         leftLabel.setText("選択: " + selected.getFileName() + "  " + formatImagePixelSize(selected));
 
-        if (selectedPairs == null || selectedPairs.isEmpty()) {
-            rightPreview.setImage(null);
-            rightLabel.setText("比較候補: なし");
+        List<DuplicateOther> others = duplicateOthersOrdered(selected, exactGroups, allSimilarPairs);
+        othersHeaderLabel.setText("他の候補 (" + others.size() + " 件)");
+        if (others.isEmpty()) {
+            Label empty = new Label("なし");
+            empty.setStyle("-fx-text-fill: #666;");
+            othersRow.getChildren().add(empty);
             return;
         }
-        int idx = Math.max(0, Math.min(selectedPairIndex, selectedPairs.size() - 1));
-        GazoVaultService.SimilarPair best = selectedPairs.get(idx);
-        Path other = best.left().equals(selected) ? best.right() : best.left();
-        rightPreview.setImage(loadThumbnail(other, 220, 220));
-        rightLabel.setText("比較: " + other.getFileName() + "  " + formatImagePixelSize(other)
-                + " (d=" + best.distance() + ", " + (idx + 1) + "/" + selectedPairs.size() + ")");
+        for (DuplicateOther o : others) {
+            othersRow.getChildren().add(buildDuplicatePreviewTile(o));
+        }
     }
 
-    private void showLargeCompareDialog(Path selected, List<GazoVaultService.SimilarPair> selectedPairs, int selectedPairIndex) {
-        if (selected == null || selectedPairs == null || selectedPairs.isEmpty()) {
-            GazoFx.showWarn("比較表示", "比較できる候補がありません。");
+    private VBox buildDuplicatePreviewTile(DuplicateOther o) {
+        ImageView iv = new ImageView(loadThumbnail(o.path(), 120, 120));
+        iv.setPreserveRatio(true);
+        iv.setFitWidth(120);
+        iv.setFitHeight(120);
+        String line3 = o.distance() == 0 ? "同一" : "d=" + o.distance();
+        Label cap = new Label(o.path().getFileName().toString() + "\n" + formatImagePixelSize(o.path()) + "\n" + line3);
+        cap.setWrapText(true);
+        cap.setMaxWidth(136);
+        cap.setStyle("-fx-font-size: 11px;");
+        VBox tile = new VBox(4, iv, cap);
+        tile.setStyle("-fx-padding: 6; -fx-background-color: #f8f6f0; -fx-background-radius: 4;");
+        return tile;
+    }
+
+    private void showDuplicateExpandDialog(Path selected, List<DuplicateOther> others) {
+        if (selected == null) {
+            GazoFx.showWarn("比較表示", "候補画像を選択してください。");
             return;
         }
-        int idx = Math.max(0, Math.min(selectedPairIndex, selectedPairs.size() - 1));
-        GazoVaultService.SimilarPair pair = selectedPairs.get(idx);
-        Path other = pair.left().equals(selected) ? pair.right() : pair.left();
-
+        if (others == null || others.isEmpty()) {
+            GazoFx.showWarn("比較表示", "表示できる他の候補がありません。");
+            return;
+        }
         Dialog<Void> dialog = new Dialog<>();
-        dialog.setTitle("2枚比較");
+        dialog.setTitle("重複・類似一覧");
+        dialog.setResizable(true);
         dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
 
-        ImageView left = new ImageView(loadThumbnail(selected, 640, 640));
-        left.setPreserveRatio(true);
-        left.setFitWidth(640);
-        left.setFitHeight(640);
-        ImageView right = new ImageView(loadThumbnail(other, 640, 640));
-        right.setPreserveRatio(true);
-        right.setFitWidth(640);
-        right.setFitHeight(640);
-
-        VBox leftBox = new VBox(6, new Label(selected.getFileName().toString() + "  " + formatImagePixelSize(selected)), left);
-        VBox rightBox = new VBox(6, new Label(other.getFileName() + "  " + formatImagePixelSize(other) + "  (d=" + pair.distance() + ")"), right);
-        HBox content = new HBox(12, leftBox, rightBox);
-        content.setPadding(new Insets(10));
-        dialog.getDialogPane().setContent(content);
+        HBox row = new HBox(16);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.getChildren().add(buildDuplicateExpandTile(selected, null, true));
+        for (DuplicateOther o : others) {
+            row.getChildren().add(buildDuplicateExpandTile(o.path(), o.distance(), false));
+        }
+        ScrollPane scroll = new ScrollPane(row);
+        scroll.setFitToHeight(true);
+        scroll.setPrefViewportHeight(520);
+        scroll.setPrefViewportWidth(920);
+        scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
+        scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
+        VBox root = new VBox(scroll);
+        root.setPadding(new Insets(10));
+        dialog.getDialogPane().setContent(root);
         dialog.showAndWait();
+    }
+
+    private VBox buildDuplicateExpandTile(Path path, Integer distanceOrNull, boolean isSelected) {
+        ImageView iv = new ImageView(loadThumbnail(path, 320, 320));
+        iv.setPreserveRatio(true);
+        iv.setFitWidth(320);
+        iv.setFitHeight(320);
+        String line3 = isSelected ? "選択" : (distanceOrNull != null && distanceOrNull == 0 ? "同一" : "d=" + distanceOrNull);
+        Label cap = new Label(path.getFileName().toString() + "\n" + formatImagePixelSize(path) + "\n" + line3);
+        cap.setWrapText(true);
+        cap.setMaxWidth(340);
+        cap.setStyle("-fx-font-size: 12px;");
+        return new VBox(8, cap, iv);
     }
 
     private void deleteDuplicateSelection(Path selected, Runnable refresh) {
