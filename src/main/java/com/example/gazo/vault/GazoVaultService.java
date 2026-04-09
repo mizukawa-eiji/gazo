@@ -37,6 +37,7 @@ public final class GazoVaultService implements AutoCloseable {
 
     private static final URI DEFAULT_KEY_ID = URI.create(MasterkeyFileKeyLoader.SCHEME + ":masterkey.cryptomator");
     private static final String IMAGES_DIR = "images";
+    private static final String VIDEOS_DIR = "videos";
     private static final String TAGS_FILE = ".gazo-tags.properties";
     private static final String DISPLAY_FILE = ".gazo-display.properties";
     private static final String CANVAS_FILE = ".gazo-canvas.properties";
@@ -85,6 +86,7 @@ public final class GazoVaultService implements AutoCloseable {
         close();
         cryptoFileSystem = CryptoFileSystemProvider.newFileSystem(vaultPath, propertiesFor(passphrase));
         Files.createDirectories(imagesDirectory());
+        Files.createDirectories(videosDirectory());
     }
 
     private void ensureUnlocked() {
@@ -98,6 +100,7 @@ public final class GazoVaultService implements AutoCloseable {
         cryptoFileSystem = CryptoFileSystemProvider.newFileSystem(vaultPath, propertiesFor(passphrase));
         Path root = cryptoFileSystem.getRootDirectories().iterator().next();
         Files.createDirectories(root.resolve(IMAGES_DIR));
+        Files.createDirectories(root.resolve(VIDEOS_DIR));
     }
 
     public Path cleartextRoot() {
@@ -107,6 +110,10 @@ public final class GazoVaultService implements AutoCloseable {
 
     public Path imagesDirectory() {
         return cleartextRoot().resolve(IMAGES_DIR);
+    }
+
+    public Path videosDirectory() {
+        return cleartextRoot().resolve(VIDEOS_DIR);
     }
 
     public Path importImage(Path sourceFile) throws IOException {
@@ -140,6 +147,61 @@ public final class GazoVaultService implements AutoCloseable {
             counter++;
         }
         return candidate;
+    }
+
+    public Path importVideo(Path sourceFile) throws IOException {
+        ensureUnlocked();
+        String name = sourceFile.getFileName().toString();
+        Path dest = resolveUniqueVideoPath(name);
+        Files.copy(sourceFile, dest);
+        return dest;
+    }
+
+    private Path resolveUniqueVideoPath(String originalFileName) throws IOException {
+        Path dir = videosDirectory();
+        String baseName = originalFileName;
+        String ext = "";
+        int dot = originalFileName.lastIndexOf('.');
+        if (dot > 0 && dot < originalFileName.length() - 1) {
+            baseName = originalFileName.substring(0, dot);
+            ext = originalFileName.substring(dot);
+        }
+        Path candidate = dir.resolve(originalFileName);
+        int counter = 1;
+        while (Files.exists(candidate)) {
+            candidate = dir.resolve(baseName + " (" + counter + ")" + ext);
+            counter++;
+        }
+        return candidate;
+    }
+
+    public List<Path> listVideos() throws IOException {
+        ensureUnlocked();
+        Path dir = videosDirectory();
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        try (Stream<Path> stream = Files.list(dir)) {
+            return stream.filter(Files::isRegularFile).sorted(Comparator.comparing(Path::getFileName)).toList();
+        }
+    }
+
+    public void deleteVideo(Path videoPath) throws IOException {
+        ensureUnlocked();
+        Path vd = videosDirectory().normalize();
+        if (!videoPath.normalize().startsWith(vd)) {
+            throw new IllegalArgumentException("not under videos directory");
+        }
+        Files.deleteIfExists(videoPath);
+        String key = videoPath.getFileName().toString();
+        Properties tagProps = loadTagProperties();
+        if (tagProps.remove(key) != null) {
+            saveTagProperties(tagProps);
+        }
+        Properties displayProps = loadDisplayProperties();
+        if (displayProps.remove(key) != null) {
+            saveDisplayProperties(displayProps);
+        }
     }
 
     public List<Path> listImages() throws IOException {
@@ -311,6 +373,18 @@ public final class GazoVaultService implements AutoCloseable {
         String key = imagePath.getFileName().toString();
         Properties properties = loadTagProperties();
         return parseTags(properties.getProperty(key, ""));
+    }
+
+    /**
+     * タグファイルを 1 回だけ読み込み、ファイル名 → タグのマップを返す（画像枚数分の繰り返し読み込みを避ける）。
+     */
+    public Map<String, Set<String>> tagsByFileName() throws IOException {
+        Properties properties = loadTagProperties();
+        Map<String, Set<String>> map = new HashMap<>();
+        for (String key : properties.stringPropertyNames()) {
+            map.put(key, parseTags(properties.getProperty(key, "")));
+        }
+        return map;
     }
 
     public void setTags(Path imagePath, Set<String> tags) throws IOException {
