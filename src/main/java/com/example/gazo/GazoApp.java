@@ -1938,7 +1938,6 @@ public final class GazoApp extends Application {
         exactDupBox.setManaged(false);
         AtomicReference<ToggleGroup> exactKeepToggleGroupRef = new AtomicReference<>(new ToggleGroup());
 
-        Button tagButton = new Button("選択にタグ付与");
         Label scanStatusLabel = new Label("");
         scanStatusLabel.setStyle("-fx-text-fill: #4a5560;");
         AtomicReference<List<GazoVaultService.SimilarPair>> similarRef = new AtomicReference<>(List.of());
@@ -1951,8 +1950,7 @@ public final class GazoApp extends Application {
                 thresholdSpinner,
                 new Label("プリセット:"),
                 thresholdPresetCombo,
-                rerunButton,
-                tagButton);
+                rerunButton);
         controls.setAlignment(Pos.CENTER_LEFT);
         VBox controlsBox = new VBox(4, controls, scanStatusLabel);
         controlsBox.setAlignment(Pos.CENTER_LEFT);
@@ -1992,7 +1990,6 @@ public final class GazoApp extends Application {
             thresholdSpinner.setDisable(busy);
             thresholdPresetCombo.setDisable(busy);
             boolean hasSelection = candidateList.getSelectionModel().getSelectedItem() != null;
-            tagButton.setDisable(!hasSelection);
             enlargeCompareButton.setDisable(!hasSelection);
             deleteSimilarButton.setDisable(!hasSelection);
             javafx.scene.Node closeBtn = dialog.getDialogPane().lookupButton(ButtonType.CLOSE);
@@ -2054,9 +2051,16 @@ public final class GazoApp extends Application {
             int threshold = thresholdFactory.getValue();
             duplicateScanRunning.set(true);
             duplicateScanRerunRequested.set(false);
-            busyPane.setVisible(false);
-            busyPane.setManaged(false);
             scanStatusLabel.setText("重複を順次チェック中…");
+            candidateList.getItems().clear();
+            selectedRef.set(null);
+            reportArea.setText("重複を検索しています…");
+            similarRef.set(List.of());
+            exactGroupsRef.set(List.of());
+            updateDuplicatePreview(null, List.of(), List.of(), leftPreview, leftLabel, othersRow, othersHeaderLabel);
+            refreshExactGroupKeepUi.run();
+            busyPane.setVisible(true);
+            busyPane.setManaged(true);
             setDuplicateBusy.run();
 
             Task<Void> task = new Task<>() {
@@ -2066,6 +2070,7 @@ public final class GazoApp extends Application {
                             .filter(p -> !isPendingDelete(p))
                             .toList();
                     int total = images.size();
+                    updateMessage("重複チェック中: 0 / " + total);
                     List<List<Path>> exact = new ArrayList<>();
                     List<GazoVaultService.SimilarPair> similar = new ArrayList<>();
                     Map<Path, String> shaCache = new HashMap<>();
@@ -2126,6 +2131,10 @@ public final class GazoApp extends Application {
                                 exactGroupsRef.set(exactSnapshot);
                                 reportArea.setText(buildDuplicateReport(exactSnapshot, similarSnapshot, threshold));
                                 candidateList.getItems().setAll(candidateSnapshot);
+                                if (!candidateSnapshot.isEmpty()) {
+                                    busyPane.setVisible(false);
+                                    busyPane.setManaged(false);
+                                }
                                 Path pending = pendingSelectAfterDupScanRef.getAndSet(null);
                                 Path selected = candidateList.getSelectionModel().getSelectedItem();
                                 if (pending != null && candidateList.getItems().contains(pending)) {
@@ -2151,6 +2160,8 @@ public final class GazoApp extends Application {
                         exactGroupsRef.set(exactFinal);
                         reportArea.setText(buildDuplicateReport(exactFinal, similarFinal, threshold));
                         candidateList.getItems().setAll(finalCandidates);
+                        busyPane.setVisible(false);
+                        busyPane.setManaged(false);
                         Path selected = candidateList.getSelectionModel().getSelectedItem();
                         if (selected == null && !finalCandidates.isEmpty()) {
                             candidateList.getSelectionModel().select(0);
@@ -2168,6 +2179,8 @@ public final class GazoApp extends Application {
             task.setOnSucceeded(ev -> {
                 duplicateScanRunning.set(false);
                 busyLabel.textProperty().unbind();
+                busyPane.setVisible(false);
+                busyPane.setManaged(false);
                 scanStatusLabel.setText("重複チェック完了");
                 setDuplicateBusy.run();
                 if (duplicateScanRerunRequested.getAndSet(false)) {
@@ -2180,6 +2193,8 @@ public final class GazoApp extends Application {
             task.setOnFailed(ev -> {
                 duplicateScanRunning.set(false);
                 busyLabel.textProperty().unbind();
+                busyPane.setVisible(false);
+                busyPane.setManaged(false);
                 scanStatusLabel.setText("");
                 setDuplicateBusy.run();
                 Throwable ex = task.getException();
@@ -2256,7 +2271,6 @@ public final class GazoApp extends Application {
         });
 
         rerunButton.setOnAction(e -> refreshAsync.run());
-        tagButton.setOnAction(e -> addTagToDuplicateSelection(candidateList.getSelectionModel().getSelectedItem(), refreshAsync));
         deleteSimilarButton.setOnAction(e -> {
             Path keep = selectedRef.get();
             if (keep == null) {
@@ -2351,10 +2365,15 @@ public final class GazoApp extends Application {
             }
         });
         candidateList.getSelectionModel().selectedItemProperty().addListener((obs, oldV, newV) -> {
-            selectedRef.set(newV);
-            updateDuplicatePreview(newV, exactGroupsRef.get(), similarRef.get(), leftPreview, leftLabel, othersRow, othersHeaderLabel);
-            refreshExactGroupKeepUi.run();
-            setDuplicateBusy.run();
+            // Linux/GTK では選択イベントの最中に重い UI 更新をすると
+            // 「XSetErrorHandler() called with a GTK error trap pushed」が出ることがあるため、
+            // イベント処理完了後にまとめて更新する。
+            Platform.runLater(() -> {
+                selectedRef.set(newV);
+                updateDuplicatePreview(newV, exactGroupsRef.get(), similarRef.get(), leftPreview, leftLabel, othersRow, othersHeaderLabel);
+                refreshExactGroupKeepUi.run();
+                setDuplicateBusy.run();
+            });
         });
         enlargeCompareButton.setOnAction(e -> showDuplicateExpandDialog(
                 selectedRef.get(),
@@ -2803,6 +2822,8 @@ public final class GazoApp extends Application {
         cap.setStyle("-fx-font-size: 11px;");
         VBox tile = new VBox(4, iv, cap);
         tile.setStyle("-fx-padding: 6; -fx-background-color: #f8f6f0; -fx-background-radius: 4;");
+        tile.setFocusTraversable(false);
+        iv.setFocusTraversable(false);
         return tile;
     }
 
@@ -2849,35 +2870,6 @@ public final class GazoApp extends Application {
         cap.setMaxWidth(340);
         cap.setStyle("-fx-font-size: 12px;");
         return new VBox(8, cap, iv);
-    }
-
-    private void addTagToDuplicateSelection(Path selected, Runnable refresh) {
-        if (selected == null) {
-            GazoFx.showWarn("タグ付与", "候補画像を選択してください。");
-            return;
-        }
-        TextInputDialog dialog = new TextInputDialog();
-        dialog.setTitle("タグ付与");
-        dialog.setHeaderText(selected.getFileName().toString());
-        dialog.setContentText("追加タグ（カンマ区切り）:");
-        Optional<String> result = dialog.showAndWait();
-        if (result.isEmpty()) {
-            return;
-        }
-        Set<String> addTags = parseUserTags(result.get());
-        if (addTags.isEmpty()) {
-            return;
-        }
-        try {
-            Set<String> tags = new LinkedHashSet<>(vault.getTags(selected));
-            tags.addAll(addTags);
-            vault.setTags(selected, tags);
-            refreshTagFilterOptions();
-            refreshGallery();
-            refresh.run();
-        } catch (IOException e) {
-            GazoFx.showError("タグ付与エラー", e.getMessage());
-        }
     }
 
     /**
