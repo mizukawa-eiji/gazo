@@ -43,6 +43,7 @@ import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.OverrunStyle;
+import javafx.scene.control.PasswordField;
 import javafx.scene.control.RadioButton;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.cell.CheckBoxListCell;
@@ -59,6 +60,7 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.CacheHint;
 import javafx.scene.Node;
+import javafx.scene.Parent;
 import javafx.scene.shape.Rectangle;
 import javafx.scene.transform.Scale;
 import javafx.scene.input.KeyCode;
@@ -76,6 +78,7 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
+import javafx.stage.StageStyle;
 import javafx.stage.Window;
 import javafx.util.Duration;
 import javafx.util.StringConverter;
@@ -85,6 +88,7 @@ import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.LinkedHashMap;
 import java.util.Iterator;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
@@ -118,6 +122,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 /**
@@ -166,6 +171,9 @@ public final class GazoApp extends Application {
      */
     private double galleryVirtualFirstTileMinY = -1;
     private FlowPane videoGallery;
+    /** 親ウィンドウ内パスワード入力のオーバーレイ／中央パネル（除去用）。 */
+    private Node vaultPasswordMountNode;
+
     private ScrollPane imageScrollPane;
     /** 一覧サムネイルの読み込みを UI スレッド外で処理する。 */
     private final ExecutorService galleryImageLoadExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -183,6 +191,16 @@ public final class GazoApp extends Application {
         return t;
     });
     private final AtomicInteger galleryImageLoadVersion = new AtomicInteger();
+    /**
+     * 仮想ウィンドウでカードを捨ててもすぐ戻せるよう、サムネ {@link Image} を LRU 保持する（スクロール時の一瞬の空白を抑える）。
+     */
+    private static final int GALLERY_THUMB_CACHE_MAX = 320;
+    private final Map<String, Image> galleryThumbCache = new LinkedHashMap<>(64, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Image> eldest) {
+            return size() > GALLERY_THUMB_CACHE_MAX;
+        }
+    };
     /**
      * スクロール・ビューポート・FlowPane 高さの変化が連続するとき、サムネの可視判定をまとめて実行する。
      */
@@ -235,14 +253,23 @@ public final class GazoApp extends Application {
 
     @Override
     public void start(Stage stage) {
+        prepareStageShellBeforeVaultUnlock(stage);
         Path defaultVaultDir = VaultPathStore.loadInitialVaultPath();
-        try {
-            openVault(stage, defaultVaultDir);
-        } catch (Exception e) {
-            GazoFx.showError("Vault を開けませんでした", e.getMessage());
-            Platform.exit();
-            return;
-        }
+        openVaultAsync(stage, defaultVaultDir, err -> {
+            if (err instanceof VaultUnlockCancelledException) {
+                Platform.exit();
+                return;
+            }
+            if (err != null) {
+                GazoFx.showError("Vault を開けませんでした", err.getMessage());
+                Platform.exit();
+                return;
+            }
+            continueApplicationAfterVaultOpened(stage);
+        });
+    }
+
+    private void continueApplicationAfterVaultOpened(Stage stage) {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             flushPendingDeletes(false);
             if (vault != null) {
@@ -604,15 +631,226 @@ public final class GazoApp extends Application {
         homeCanvasPreviewHolder.setLayoutY((vh - scaledH) / 2.0);
     }
 
-    private void openVault(Stage stage, Path vaultDir) throws IOException, MasterkeyLoadingFailedException {
-        GazoVaultService newVault = new GazoVaultService(vaultDir);
-        unlockOrCreate(stage, newVault);
-        if (vault != null) {
-            vault.close();
+    /**
+     * Vault 解錠の前にメイン {@link Stage} を表示する（パスワードは {@link #mountVaultPasswordForm} でこのウィンドウ内に出す）。
+     * 本体 UI の {@link Scene} は {@link #continueApplicationAfterVaultOpened} で差し替える。
+     */
+    private void prepareStageShellBeforeVaultUnlock(Stage stage) {
+        if (stage.getScene() != null) {
+            return;
         }
-        vault = newVault;
-        VaultPathStore.saveLastVaultPath(vault.getVaultPath());
-        reloadCanvasSelectionFromVault("default");
+        BorderPane shell = new BorderPane();
+        shell.setStyle("-fx-background-color: linear-gradient(to bottom, #f2efe7, #ebe5d8);");
+        stage.setTitle("Gazo — 暗号化フォルダに保存する写真ビューア (JavaFX)");
+        GazoFx.applyAppIcons(stage);
+        VBox topStrip = new VBox(16);
+        topStrip.setAlignment(Pos.TOP_CENTER);
+        topStrip.setPadding(new Insets(36, 24, 16, 24));
+        Node iconGraphic = GazoFx.createAppIconView(128);
+        if (iconGraphic != null) {
+            topStrip.getChildren().add(iconGraphic);
+        }
+        Label shellHint = new Label("Vault を準備しています…");
+        shellHint.setStyle("-fx-text-fill: #5c564a; -fx-font-size: 14px;");
+        topStrip.getChildren().add(shellHint);
+        shell.setTop(topStrip);
+
+        stage.setScene(new Scene(shell, 560, 400));
+        stage.setResizable(true);
+        stage.centerOnScreen();
+        stage.show();
+        stage.toFront();
+        stage.requestFocus();
+    }
+
+    private void openVaultAsync(Stage stage, Path vaultDir, Consumer<Exception> done) {
+        try {
+            GazoVaultService newVault = new GazoVaultService(vaultDir);
+            unlockOrCreateInline(stage, newVault, () -> {
+                try {
+                    if (vault != null) {
+                        vault.close();
+                    }
+                    vault = newVault;
+                    VaultPathStore.saveLastVaultPath(vault.getVaultPath());
+                    reloadCanvasSelectionFromVault("default");
+                    done.accept(null);
+                } catch (Exception e) {
+                    done.accept(e);
+                }
+            }, () -> done.accept(new VaultUnlockCancelledException()));
+        } catch (Exception e) {
+            done.accept(e);
+        }
+    }
+
+    private void clearVaultPasswordMount(Stage stage) {
+        if (vaultPasswordMountNode == null || stage.getScene() == null) {
+            return;
+        }
+        Parent root = stage.getScene().getRoot();
+        if (root instanceof BorderPane bp) {
+            bp.setCenter(null);
+        } else if (root instanceof StackPane sp) {
+            sp.getChildren().remove(vaultPasswordMountNode);
+        }
+        vaultPasswordMountNode = null;
+    }
+
+    private void mountVaultPasswordForm(Stage stage, Node form) {
+        clearVaultPasswordMount(stage);
+        Parent root = stage.getScene().getRoot();
+        if (root instanceof BorderPane bp) {
+            ScrollPane scroll = new ScrollPane(form);
+            scroll.setFitToWidth(true);
+            scroll.setStyle("-fx-background: transparent; -fx-background-color: transparent;");
+            bp.setCenter(scroll);
+            vaultPasswordMountNode = scroll;
+        } else if (root instanceof StackPane sp) {
+            StackPane overlay = new StackPane(form);
+            overlay.setAlignment(Pos.CENTER);
+            overlay.setStyle("-fx-background-color: rgba(252,250,245,0.97);");
+            overlay.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+            sp.getChildren().add(overlay);
+            vaultPasswordMountNode = overlay;
+        }
+    }
+
+    /** 明るい背景でも読める濃い文字色（テーマ既定だと白文字になる環境がある）。 */
+    private static final String VAULT_FORM_LABEL_TEXT = "-fx-text-fill: #33312d;";
+    private static final String VAULT_FORM_FIELD_STYLE = "-fx-text-fill: #33312d; -fx-prompt-text-fill: #6a6355;";
+
+    /** 親ウィンドウ内にロック解除用パスワード欄を出す（別ダイアログは使わない）。 */
+    private void showUnlockPasswordInline(Stage stage, String inlineError, Consumer<char[]> onSubmit, Runnable onCancel) {
+        Label title = new Label("Vault のロックを解除");
+        title.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; " + VAULT_FORM_LABEL_TEXT);
+        Label msg = new Label("パスワードを入力してください。");
+        msg.setStyle(VAULT_FORM_LABEL_TEXT);
+        Label errLabel = new Label(inlineError == null ? "" : inlineError);
+        errLabel.setStyle("-fx-text-fill: #b83232;");
+        errLabel.setWrapText(true);
+        boolean showErr = inlineError != null && !inlineError.isBlank();
+        errLabel.setVisible(showErr);
+        errLabel.setManaged(showErr);
+        PasswordField passField = new PasswordField();
+        passField.setPromptText("パスワード");
+        passField.setStyle(VAULT_FORM_FIELD_STYLE);
+        Button ok = new Button("OK");
+        Button cancel = new Button("キャンセル");
+        ok.setDefaultButton(true);
+        HBox row = new HBox(8, ok, cancel);
+        row.setAlignment(Pos.CENTER_LEFT);
+        VBox box = new VBox(10, title, msg, errLabel, passField, row);
+        box.setPadding(new Insets(20));
+        box.setMaxWidth(440);
+        box.setStyle("-fx-background-color: #f5f2ea; -fx-background-radius: 8;");
+        ok.setOnAction(e -> onSubmit.accept(passField.getText().toCharArray()));
+        cancel.setOnAction(e -> {
+            clearVaultPasswordMount(stage);
+            onCancel.run();
+        });
+        passField.setOnAction(e -> ok.fire());
+        mountVaultPasswordForm(stage, box);
+        Platform.runLater(passField::requestFocus);
+    }
+
+    private void showCreateVaultPasswordInline(Stage stage, Consumer<char[]> onSuccess, Runnable onCancel) {
+        Label title = new Label("新しい Vault を作成");
+        title.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; " + VAULT_FORM_LABEL_TEXT);
+        Label msg = new Label("パスワードを設定してください。");
+        msg.setStyle(VAULT_FORM_LABEL_TEXT);
+        Label errLabel = new Label();
+        errLabel.setStyle("-fx-text-fill: #b83232;");
+        errLabel.setWrapText(true);
+        errLabel.setVisible(false);
+        errLabel.setManaged(false);
+        Label lab1 = new Label("パスワード");
+        lab1.setStyle(VAULT_FORM_LABEL_TEXT);
+        Label lab2 = new Label("確認");
+        lab2.setStyle(VAULT_FORM_LABEL_TEXT);
+        PasswordField p1 = new PasswordField();
+        p1.setPromptText("パスワード");
+        p1.setStyle(VAULT_FORM_FIELD_STYLE);
+        PasswordField p2 = new PasswordField();
+        p2.setPromptText("確認");
+        p2.setStyle(VAULT_FORM_FIELD_STYLE);
+        Button ok = new Button("OK");
+        Button cancel = new Button("キャンセル");
+        ok.setDefaultButton(true);
+        HBox row = new HBox(8, ok, cancel);
+        row.setAlignment(Pos.CENTER_LEFT);
+        VBox box = new VBox(10, title, msg, errLabel, lab1, p1, lab2, p2, row);
+        box.setPadding(new Insets(20));
+        box.setMaxWidth(440);
+        box.setStyle("-fx-background-color: #f5f2ea; -fx-background-radius: 8;");
+        ok.setOnAction(e -> {
+            char[] a = p1.getText().toCharArray();
+            char[] b = p2.getText().toCharArray();
+            if (a.length == 0) {
+                errLabel.setText("パスワードを入力してください。");
+                errLabel.setVisible(true);
+                errLabel.setManaged(true);
+                Arrays.fill(b, '\0');
+                return;
+            }
+            if (!Arrays.equals(a, b)) {
+                errLabel.setText("確認用パスワードが一致しません。");
+                errLabel.setVisible(true);
+                errLabel.setManaged(true);
+                Arrays.fill(a, '\0');
+                Arrays.fill(b, '\0');
+                return;
+            }
+            Arrays.fill(b, '\0');
+            clearVaultPasswordMount(stage);
+            onSuccess.accept(a);
+        });
+        cancel.setOnAction(e -> {
+            clearVaultPasswordMount(stage);
+            onCancel.run();
+        });
+        p2.setOnAction(e -> ok.fire());
+        mountVaultPasswordForm(stage, box);
+        Platform.runLater(p1::requestFocus);
+    }
+
+    private void unlockOrCreateInline(Stage stage, GazoVaultService targetVault, Runnable onUnlocked, Runnable onCancelled) {
+        if (!targetVault.vaultExists()) {
+            showCreateVaultPasswordInline(stage, pass -> {
+                try {
+                    targetVault.createVault(new String(pass));
+                    Arrays.fill(pass, '\0');
+                    onUnlocked.run();
+                } catch (IOException | MasterkeyLoadingFailedException e) {
+                    Arrays.fill(pass, '\0');
+                    GazoFx.showError("Vault を作成できませんでした", e.getMessage());
+                    onCancelled.run();
+                }
+            }, onCancelled);
+            return;
+        }
+        runUnlockLoop(stage, targetVault, null, onUnlocked, onCancelled);
+    }
+
+    private void runUnlockLoop(Stage stage, GazoVaultService targetVault, String inlineError, Runnable onUnlocked,
+            Runnable onCancelled) {
+        showUnlockPasswordInline(stage, inlineError, pass -> {
+            try {
+                targetVault.unlock(new String(pass));
+                Arrays.fill(pass, '\0');
+                clearVaultPasswordMount(stage);
+                onUnlocked.run();
+            } catch (InvalidPassphraseException e) {
+                Arrays.fill(pass, '\0');
+                clearVaultPasswordMount(stage);
+                runUnlockLoop(stage, targetVault, "パスワードが正しくありません。", onUnlocked, onCancelled);
+            } catch (IOException | MasterkeyLoadingFailedException e) {
+                Arrays.fill(pass, '\0');
+                clearVaultPasswordMount(stage);
+                GazoFx.showError("Vault を開けませんでした", e.getMessage());
+                onCancelled.run();
+            }
+        }, onCancelled);
     }
 
     void reloadCanvasSelectionFromVault(String canvasName) {
@@ -700,8 +938,12 @@ public final class GazoApp extends Application {
         Label hint = new Label("← / → または A / D でキャンバス切替（キャンバス全体を表示）　Esc で閉じる");
         hint.setStyle("-fx-text-fill: #aaa;");
         Stage slideStage = new Stage();
-        slideStage.initOwner(owner);
+        // initOwner すると GTK 等でトランジェント扱いになり最大化できない環境がある（Chromebook Linux 等）。
         slideStage.initModality(Modality.WINDOW_MODAL);
+        slideStage.initStyle(StageStyle.DECORATED);
+        slideStage.setResizable(true);
+        slideStage.setMinWidth(480);
+        slideStage.setMinHeight(360);
         slideStage.setTitle("スライドショー — キャンバス全体");
         GazoFx.applyAppIcons(slideStage);
         BorderPane root = new BorderPane();
@@ -790,6 +1032,10 @@ public final class GazoApp extends Application {
         slideViewport.widthProperty().addListener((o, ov, nv) -> fitCanvas.run());
         slideViewport.heightProperty().addListener((o, ov, nv) -> fitCanvas.run());
         slideStage.setOnShown(e -> {
+            if (owner != null && owner.isShowing()) {
+                slideStage.setX(Math.round(owner.getX() + (owner.getWidth() - slideStage.getWidth()) / 2));
+                slideStage.setY(Math.round(owner.getY() + (owner.getHeight() - slideStage.getHeight()) / 2));
+            }
             applyLayout.run();
             Platform.runLater(() -> {
                 fitCanvas.run();
@@ -835,45 +1081,24 @@ public final class GazoApp extends Application {
         if (selected == null) {
             return;
         }
-        try {
-            openVault(stage, selected.toPath());
+        openVaultAsync(stage, selected.toPath(), err -> {
+            if (err instanceof VaultUnlockCancelledException) {
+                return;
+            }
+            if (err != null) {
+                GazoFx.showError("Vault 変更エラー", err.getMessage());
+                return;
+            }
             updateVaultPathLabel();
             refreshTagFilterOptions();
             refreshGallery();
             refreshVideoList();
-        } catch (Exception e) {
-            GazoFx.showError("Vault 変更エラー", e.getMessage());
-        }
+        });
     }
 
-    private void unlockOrCreate(Stage stage, GazoVaultService targetVault) throws IOException, MasterkeyLoadingFailedException {
-        if (!targetVault.vaultExists()) {
-            char[] pass = GazoFx.promptPasswordTwice("新しい Vault を作成", "パスワードを設定してください");
-            if (pass == null) {
-                throw new IllegalStateException("キャンセルされました");
-            }
-            try {
-                targetVault.createVault(new String(pass));
-            } finally {
-                Arrays.fill(pass, '\0');
-            }
-            return;
-        }
-
-        while (true) {
-            char[] pass = GazoFx.promptPassword("Vault のロックを解除", "パスワードを入力してください");
-            if (pass == null) {
-                throw new IllegalStateException("キャンセルされました");
-            }
-            try {
-                targetVault.unlock(new String(pass));
-                Arrays.fill(pass, '\0');
-                return;
-            } catch (InvalidPassphraseException e) {
-                Arrays.fill(pass, '\0');
-                GazoFx.showWarn("解除できません", "パスワードが正しくありません。");
-            }
-        }
+    /** パスワード入力をキャンセルしたときに {@link #openVaultAsync} の完了コールバックへ渡す。 */
+    private static final class VaultUnlockCancelledException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
     }
 
     private void addImages(Stage stage) {
@@ -975,6 +1200,7 @@ public final class GazoApp extends Application {
         galleryVisibleDebounce.stop();
         galleryEvictDebounce.stop();
         galleryImageLoadVersion.incrementAndGet();
+        galleryThumbCache.clear();
         galleryVirtualLastFirstIndex = Integer.MIN_VALUE;
         galleryVirtualLastCols = -1;
         galleryVirtualStickyCols = -1;
@@ -1869,8 +2095,8 @@ public final class GazoApp extends Application {
         view.setSmooth(true);
         view.setCache(true);
         view.setCacheHint(CacheHint.SPEED);
-        // 初期描画では画像を読まず、可視範囲に入ったカードだけ読み込む。
-        view.setImage(null);
+        // キャッシュがあれば即表示（仮想ウィンドウ再構築で ImageView が新規でも空白を短くする）。
+        view.setImage(galleryThumbCache.get(galleryThumbCacheKey(imagePath, imageW, imageH)));
 
         StackPane photoArea = new StackPane(view);
         photoArea.setPadding(new Insets(12, 12, 6, 12));
@@ -2079,8 +2305,18 @@ public final class GazoApp extends Application {
         }
     }
 
+    private static String galleryThumbCacheKey(Path path, int w, int h) {
+        return path.normalize().toString() + "|" + w + "x" + h;
+    }
+
     private void requestGalleryImageLoad(ImageView target, Path path, int w, int h, int version) {
         String requestId = version + "|" + path + "|" + w + "x" + h;
+        Image cached = galleryThumbCache.get(galleryThumbCacheKey(path, w, h));
+        if (cached != null) {
+            target.getProperties().put(GALLERY_IMAGE_REQUEST_KEY, requestId);
+            target.setImage(cached);
+            return;
+        }
         Object prev = target.getProperties().get(GALLERY_IMAGE_REQUEST_KEY);
         if (requestId.equals(prev)) {
             return;
@@ -2092,6 +2328,9 @@ public final class GazoApp extends Application {
                 Object current = target.getProperties().get(GALLERY_IMAGE_REQUEST_KEY);
                 if (!requestId.equals(current)) {
                     return;
+                }
+                if (img != null) {
+                    galleryThumbCache.put(galleryThumbCacheKey(path, w, h), img);
                 }
                 // 一覧更新やスクロールで要求が切り替わっていなければ反映する。
                 target.setImage(img);

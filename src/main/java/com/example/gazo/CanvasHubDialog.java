@@ -11,11 +11,9 @@ import javafx.scene.Group;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
-import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContentDisplay;
-import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
@@ -29,14 +27,19 @@ import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.Tooltip;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.SpinnerValueFactory;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
 import javafx.scene.transform.Scale;
+import javafx.stage.Modality;
 import javafx.stage.Stage;
+import javafx.stage.StageStyle;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -64,11 +67,15 @@ public final class CanvasHubDialog {
         app.canvasSelection.clear();
         app.canvasSelection.addAll(app.listCheckedSelection);
     }
-    Dialog<Void> dialog = new Dialog<>();
-    dialog.initOwner(owner);
-    dialog.setTitle("キャンバス");
-    dialog.setResizable(true);
-    dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+    // Dialog ではなく Stage を使う。Linux/Chromebook の GTK では Dialog のウィンドウ種別のせいで最大化できないことがある。
+    final Stage hubStage = new Stage();
+    // initOwner すると GTK 等で最大化できない環境があるため付けない（メインウィンドウ上に中央寄せは別途考慮可能）。
+    hubStage.initModality(Modality.APPLICATION_MODAL);
+    hubStage.initStyle(StageStyle.DECORATED);
+    hubStage.setTitle("キャンバス");
+    hubStage.setResizable(true);
+    hubStage.setMinWidth(640);
+    hubStage.setMinHeight(420);
 
     AtomicReference<String> currentLayout = new AtomicReference<>("default");
 
@@ -89,7 +96,11 @@ public final class CanvasHubDialog {
     hubHint.setMaxWidth(1000);
     hubHint.setStyle("-fx-text-fill: #555;");
 
-    HBox topBar = new HBox(12, slideshowButton);
+    Button closeHubButton = new Button("閉じる");
+    closeHubButton.setOnAction(e -> hubStage.close());
+    Region topBarSpacer = new Region();
+    HBox.setHgrow(topBarSpacer, Priority.ALWAYS);
+    HBox topBar = new HBox(12, slideshowButton, topBarSpacer, closeHubButton);
     topBar.setAlignment(Pos.CENTER_LEFT);
 
     AtomicReference<Runnable> refreshEditor = new AtomicReference<>(() -> {});
@@ -699,20 +710,27 @@ public final class CanvasHubDialog {
     VBox root = new VBox(8, topBar, hubHint, tabPane);
     VBox.setVgrow(tabPane, Priority.ALWAYS);
     root.setPadding(new Insets(8));
-    dialog.getDialogPane().setContent(root);
-    dialog.getDialogPane().setPrefSize(1180, 820);
+    Scene hubScene = new Scene(root, 1180, 820);
+    hubStage.setScene(hubScene);
+    GazoFx.applyAppIcons(hubStage);
+    hubStage.addEventFilter(KeyEvent.KEY_PRESSED, e -> {
+        if (e.getCode() == KeyCode.ESCAPE) {
+            hubStage.close();
+            e.consume();
+        }
+    });
 
     applyCanvasSize.run();
     render.run();
     randomBootstrap.run();
 
-    dialog.setOnShown(e -> {
-        Scene ds = dialog.getDialogPane().getScene();
-        if (ds != null && ds.getWindow() instanceof Stage) {
-            GazoFx.applyAppIcons((Stage) ds.getWindow());
+    hubStage.setOnShown(e -> {
+        if (owner != null && owner.isShowing()) {
+            hubStage.setX(Math.round(owner.getX() + (owner.getWidth() - hubStage.getWidth()) / 2));
+            hubStage.setY(Math.round(owner.getY() + (owner.getHeight() - hubStage.getHeight()) / 2));
         }
         Platform.runLater(updateEditCanvasFit);
     });
-    dialog.showAndWait();
+    hubStage.showAndWait();
     }
 }
