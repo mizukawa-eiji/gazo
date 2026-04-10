@@ -197,6 +197,9 @@ public final class CliImport {
 
     private static boolean isImageFile(Path path) {
         String name = path.getFileName().toString().toLowerCase();
+        if (!name.isEmpty() && name.charAt(0) == '.') {
+            return false;
+        }
         return name.endsWith(".jpg")
                 || name.endsWith(".jpeg")
                 || name.endsWith(".png")

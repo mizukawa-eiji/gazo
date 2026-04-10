@@ -130,6 +130,11 @@ public final class GazoVaultService implements AutoCloseable {
     public Path importImage(Path sourceFile) throws IOException {
         ensureUnlocked();
         String name = sourceFile.getFileName().toString();
+        if (!isVisibleUserMediaName(sourceFile)) {
+            throw new IOException(
+                    "ファイル名が「.」で始まるファイルは登録できません（._ファイル名.jpg 等の Apple メタデータは実画像ではありません）: "
+                            + name);
+        }
         Path dest = resolveUniqueImagePath(name);
         Files.copy(sourceFile, dest);
         // 登録時にサムネイルを生成（失敗しても登録自体は継続）。
@@ -143,6 +148,12 @@ public final class GazoVaultService implements AutoCloseable {
 
     public Path importImage(InputStream in, String fileName) throws IOException {
         ensureUnlocked();
+        Path namePath = Path.of(fileName).getFileName();
+        if (namePath == null || !isVisibleUserMediaName(namePath)) {
+            throw new IOException(
+                    "ファイル名が「.」で始まるファイルは登録できません（._ファイル名.jpg 等の Apple メタデータは実画像ではありません）: "
+                            + fileName);
+        }
         Path dest = resolveUniqueImagePath(fileName);
         Files.copy(in, dest);
         // 登録時にサムネイルを生成（失敗しても登録自体は継続）。
@@ -290,6 +301,15 @@ public final class GazoVaultService implements AutoCloseable {
         return candidate;
     }
 
+    /**
+     * 一覧・インポート対象にしないファイル名。
+     * 先頭が {@code .} のもの（.DS_Store、macOS の AppleDouble {@code ._元.jpg} など）は実画像ではないことが多い。
+     */
+    private static boolean isVisibleUserMediaName(Path path) {
+        String name = path.getFileName().toString();
+        return !name.isEmpty() && name.charAt(0) != '.';
+    }
+
     public List<Path> listVideos() throws IOException {
         ensureUnlocked();
         Path dir = videosDirectory();
@@ -297,7 +317,11 @@ public final class GazoVaultService implements AutoCloseable {
             return List.of();
         }
         try (Stream<Path> stream = Files.list(dir)) {
-            return stream.filter(Files::isRegularFile).sorted(Comparator.comparing(Path::getFileName)).toList();
+            return stream
+                    .filter(Files::isRegularFile)
+                    .filter(GazoVaultService::isVisibleUserMediaName)
+                    .sorted(Comparator.comparing(Path::getFileName))
+                    .toList();
         }
     }
 
@@ -326,7 +350,11 @@ public final class GazoVaultService implements AutoCloseable {
             return List.of();
         }
         try (Stream<Path> stream = Files.list(dir)) {
-            return stream.filter(Files::isRegularFile).sorted(Comparator.comparing(Path::getFileName)).toList();
+            return stream
+                    .filter(Files::isRegularFile)
+                    .filter(GazoVaultService::isVisibleUserMediaName)
+                    .sorted(Comparator.comparing(Path::getFileName))
+                    .toList();
         }
     }
 
@@ -371,6 +399,77 @@ public final class GazoVaultService implements AutoCloseable {
         return pairs;
     }
 
+    /**
+     * 全レイアウトの選択順（{@code …::__canvas_selection__}）と、旧形式の {@link #CANVAS_SELECTION_KEY}、
+     * および {@code layout::ファイル名} 形式の位置キーから、ファイル名を取り除く。
+     */
+    private void purgeImageFromCanvasState(String fileName) throws IOException {
+        Properties canvasProps = loadCanvasProperties();
+        boolean changed = false;
+        for (String key : new ArrayList<>(canvasProps.stringPropertyNames())) {
+            if (key.endsWith("::__canvas_selection__")) {
+                String raw = canvasProps.getProperty(key, "").trim();
+                if (raw.isEmpty()) {
+                    continue;
+                }
+                boolean inSelection = false;
+                for (String part : raw.split(",")) {
+                    if (part.trim().equals(fileName)) {
+                        inSelection = true;
+                        break;
+                    }
+                }
+                if (!inSelection) {
+                    continue;
+                }
+                List<String> kept = new ArrayList<>();
+                for (String part : raw.split(",")) {
+                    String t = part.trim();
+                    if (!t.isEmpty() && !t.equals(fileName)) {
+                        kept.add(t);
+                    }
+                }
+                if (kept.isEmpty()) {
+                    canvasProps.remove(key);
+                } else {
+                    canvasProps.setProperty(key, String.join(",", kept));
+                }
+                changed = true;
+            } else if (key.endsWith("::" + fileName)) {
+                canvasProps.remove(key);
+                changed = true;
+            }
+        }
+        String legacy = canvasProps.getProperty(CANVAS_SELECTION_KEY, "").trim();
+        if (!legacy.isEmpty()) {
+            boolean legacyContains = false;
+            for (String part : legacy.split(",")) {
+                if (part.trim().equals(fileName)) {
+                    legacyContains = true;
+                    break;
+                }
+            }
+            if (legacyContains) {
+                List<String> keptLegacy = new ArrayList<>();
+                for (String part : legacy.split(",")) {
+                    String t = part.trim();
+                    if (!t.isEmpty() && !t.equals(fileName)) {
+                        keptLegacy.add(t);
+                    }
+                }
+                if (keptLegacy.isEmpty()) {
+                    canvasProps.remove(CANVAS_SELECTION_KEY);
+                } else {
+                    canvasProps.setProperty(CANVAS_SELECTION_KEY, String.join(",", keptLegacy));
+                }
+                changed = true;
+            }
+        }
+        if (changed) {
+            saveCanvasProperties(canvasProps);
+        }
+    }
+
     public void deleteImage(Path imagePath) throws IOException {
         ensureUnlocked();
         Files.deleteIfExists(imagePath);
@@ -386,9 +485,7 @@ public final class GazoVaultService implements AutoCloseable {
         Properties displayProps = loadDisplayProperties();
         displayProps.remove(key);
         saveDisplayProperties(displayProps);
-        Properties canvasProps = loadCanvasProperties();
-        canvasProps.remove(key);
-        saveCanvasProperties(canvasProps);
+        purgeImageFromCanvasState(key);
         Properties transformProps = loadCanvasTransformProperties();
         List<String> transformKeys = new ArrayList<>(transformProps.stringPropertyNames());
         for (String tKey : transformKeys) {
@@ -654,7 +751,7 @@ public final class GazoVaultService implements AutoCloseable {
                 continue;
             }
             Path path = dir.resolve(name);
-            if (Files.isRegularFile(path)) {
+            if (Files.isRegularFile(path) && isVisibleUserMediaName(path)) {
                 out.add(path);
             }
         }
