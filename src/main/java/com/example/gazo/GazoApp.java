@@ -42,7 +42,6 @@ import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TextInputDialog;
 import javafx.scene.control.OverrunStyle;
-import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.RadioButton;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.control.cell.CheckBoxListCell;
@@ -63,6 +62,7 @@ import javafx.scene.transform.Scale;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.TransferMode;
@@ -79,6 +79,7 @@ import javafx.util.StringConverter;
 import org.cryptomator.cryptolib.api.InvalidPassphraseException;
 import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Iterator;
@@ -104,9 +105,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -119,6 +123,15 @@ public final class GazoApp extends Application {
     private static final double BASE_CANVAS_HEIGHT = 1400.0;
     GazoVaultService vault;
     private Stage primaryStage;
+    /** メイン Scene ルート（画像一覧など + 処理中オーバーレイ + 類似チェック）。 */
+    private StackPane mainRootStack;
+    /**
+     * 類似チェック UI（メインに重ねる）。Linux では別 Stage が GTK と相性悪く警告が出ることがあるため、
+     * Stage は使わない。
+     */
+    private StackPane duplicateReportOverlay;
+    /** 再オープン時に同じスキャン処理を再走させる。 */
+    private Runnable duplicateReportRefreshAction;
     /** メインウィンドウに重ねる処理中オーバーレイ（サムネイル再作成など） */
     private StackPane appBusyPane;
     private Label appBusyMessageLabel;
@@ -466,16 +479,18 @@ public final class GazoApp extends Application {
         appBusyPane = new StackPane();
         Region appBusyBg = new Region();
         appBusyBg.setStyle("-fx-background-color: rgba(255,255,255,0.82);");
-        ProgressIndicator appBusySpinner = new ProgressIndicator();
-        appBusySpinner.setPrefSize(44, 44);
+        // Linux/GTK: ProgressIndicator の常時アニメーションが XSetErrorHandler 警告の原因になりやすいため使わない。
+        Label appBusyHeadline = new Label("処理中");
+        appBusyHeadline.setStyle("-fx-font-size: 15px; -fx-font-weight: bold;");
         appBusyMessageLabel = new Label("処理中…");
         appBusyMessageLabel.setStyle("-fx-font-size: 13px;");
-        VBox appBusyCenter = new VBox(10, appBusySpinner, appBusyMessageLabel);
+        VBox appBusyCenter = new VBox(8, appBusyHeadline, appBusyMessageLabel);
         appBusyCenter.setAlignment(Pos.CENTER);
         appBusyPane.getChildren().addAll(appBusyBg, appBusyCenter);
         appBusyPane.setVisible(false);
         appBusyPane.setManaged(false);
         StackPane rootStack = new StackPane(root, appBusyPane);
+        mainRootStack = rootStack;
 
         Scene scene = new Scene(rootStack, 920, 680);
         stage.setTitle("Gazo — 暗号化フォルダに保存する写真ビューア (JavaFX)");
@@ -1831,9 +1846,23 @@ public final class GazoApp extends Application {
     }
 
     private void showDuplicateReport() {
-        Dialog<Void> dialog = new Dialog<>();
-        dialog.setTitle("類似チェック結果（重複含む）");
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        if (mainRootStack == null) {
+            return;
+        }
+        if (duplicateReportOverlay != null) {
+            if (duplicateReportOverlay.isVisible()) {
+                duplicateReportOverlay.requestFocus();
+                return;
+            }
+            duplicateReportOverlay.setVisible(true);
+            duplicateReportOverlay.setManaged(true);
+            duplicateReportOverlay.toFront();
+            if (duplicateReportRefreshAction != null) {
+                duplicateReportRefreshAction.run();
+            }
+            Platform.runLater(() -> duplicateReportOverlay.requestFocus());
+            return;
+        }
 
         Spinner<Integer> thresholdSpinner = new Spinner<>();
         SpinnerValueFactory.IntegerSpinnerValueFactory thresholdFactory =
@@ -1980,19 +2009,37 @@ public final class GazoApp extends Application {
         StackPane busyPane = new StackPane();
         Region busyBg = new Region();
         busyBg.setStyle("-fx-background-color: rgba(255,255,255,0.82);");
-        ProgressIndicator busySpinner = new ProgressIndicator();
-        busySpinner.setPrefSize(44, 44);
+        // Linux/GTK: ProgressIndicator は常時アニメーションでネイティブ描画と衝突しやすい。テキストのみにする。
+        Label busyStaticLabel = new Label("検索中");
+        busyStaticLabel.setStyle("-fx-font-size: 15px; -fx-font-weight: bold;");
         Label busyLabel = new Label("類似候補（重複含む）を検索しています…");
         busyLabel.setStyle("-fx-font-size: 13px;");
-        VBox busyCenter = new VBox(10, busySpinner, busyLabel);
+        VBox busyCenter = new VBox(8, busyStaticLabel, busyLabel);
         busyCenter.setAlignment(Pos.CENTER);
         busyPane.getChildren().addAll(busyBg, busyCenter);
         busyPane.setVisible(false);
         busyPane.setManaged(false);
 
-        StackPane rootStack = new StackPane(content, busyPane);
-        dialog.getDialogPane().setContent(rootStack);
+        // 別 Stage を出すと Linux/GTK で XSetErrorHandler 警告が出ることがあるため、
+        // 同一ダイアログ内のオーバーレイで拡大表示する。
+        StackPane expandOverlayPane = new StackPane();
+        expandOverlayPane.setVisible(false);
+        expandOverlayPane.setManaged(false);
+
+        StackPane rootStack = new StackPane(content, busyPane, expandOverlayPane);
         busyPane.setMouseTransparent(true);
+
+        Button dupCloseButton = new Button("閉じる");
+        HBox dupButtonRow = new HBox(dupCloseButton);
+        dupButtonRow.setAlignment(Pos.CENTER_RIGHT);
+        dupButtonRow.setPadding(new Insets(8, 12, 12, 12));
+        Label dupTitleLabel = new Label("類似チェック結果（重複含む）");
+        dupTitleLabel.setStyle("-fx-font-size: 15px; -fx-font-weight: bold;");
+        HBox dupTitleRow = new HBox(dupTitleLabel);
+        dupTitleRow.setAlignment(Pos.CENTER_LEFT);
+        dupTitleRow.setPadding(new Insets(12, 12, 0, 12));
+        VBox dupShell = new VBox(dupTitleRow, rootStack, dupButtonRow);
+        VBox.setVgrow(rootStack, Priority.ALWAYS);
 
         AtomicBoolean duplicateScanRunning = new AtomicBoolean(false);
         AtomicBoolean duplicateScanRerunRequested = new AtomicBoolean(false);
@@ -2002,11 +2049,9 @@ public final class GazoApp extends Application {
             thresholdSpinner.setDisable(busy);
             thresholdPresetCombo.setDisable(busy);
             boolean hasSelection = candidateList.getSelectionModel().getSelectedItem() != null;
-            enlargeCompareButton.setDisable(!hasSelection);
-            javafx.scene.Node closeBtn = dialog.getDialogPane().lookupButton(ButtonType.CLOSE);
-            if (closeBtn != null) {
-                closeBtn.setDisable(busy);
-            }
+            // スキャン中は Task が runLater で UI 更新中。拡大オーバーレイと重なると Linux/GTK で警告が出ることがある。
+            enlargeCompareButton.setDisable(busy || !hasSelection);
+            dupCloseButton.setDisable(busy);
         };
 
         AtomicReference<Path> pendingSelectAfterDupScanRef = new AtomicReference<>(null);
@@ -2045,6 +2090,9 @@ public final class GazoApp extends Application {
             exactDupBox.setVisible(true);
             exactDupBox.setManaged(true);
             mergeDeleteExactButton.setDisable(false);
+            if (duplicateScanRunning.get()) {
+                mergeDeleteExactButton.setDisable(true);
+            }
             boolean matched = false;
             for (Path p : group) {
                 String relation = sel.equals(p)
@@ -2053,6 +2101,17 @@ public final class GazoApp extends Application {
                 RadioButton rb = new RadioButton(p.getFileName().toString() + "  " + formatImagePixelSize(p) + "  [" + relation + "]");
                 rb.setUserData(p);
                 rb.setToggleGroup(tg);
+                // Linux/GTK: トグル変更をマウスイベントの最中にやらない（XSetErrorHandler 警告回避）。
+                rb.addEventFilter(MouseEvent.MOUSE_PRESSED, ev -> {
+                    if (ev.getButton() != MouseButton.PRIMARY) {
+                        return;
+                    }
+                    if (tg.getSelectedToggle() == rb) {
+                        return;
+                    }
+                    ev.consume();
+                    Platform.runLater(() -> tg.selectToggle(rb));
+                });
                 exactRadioList.getChildren().add(rb);
             }
             for (Node n : exactRadioList.getChildren()) {
@@ -2076,7 +2135,7 @@ public final class GazoApp extends Application {
             int threshold = thresholdFactory.getValue();
             duplicateScanRunning.set(true);
             duplicateScanRerunRequested.set(false);
-            scanStatusLabel.setText("類似候補（重複含む）を順次チェック中…");
+            scanStatusLabel.setText("類似候補（重複含む）をチェック中…");
             candidateList.getItems().clear();
             selectedRef.set(null);
             reportArea.setText("類似候補（重複含む）を検索しています…");
@@ -2090,58 +2149,82 @@ public final class GazoApp extends Application {
 
             Task<Void> task = new Task<>() {
                 @Override
-                protected Void call() throws IOException {
+                protected Void call() throws Exception {
                     List<Path> images = vault.listImages().stream()
                             .filter(p -> !isPendingDelete(p))
                             .toList();
                     int total = images.size();
                     long totalPairs = (long) total * (long) Math.max(0, total - 1) / 2L;
-                    long donePairs = 0L;
                     updateMessage("類似チェック中: 0 / " + total + "  (比較 0 / " + totalPairs + ")");
+                    long lastRowProgressMsgMs = 0L;
+                    AtomicLong lastPairProgressMsgMs = new AtomicLong(0L);
                     List<List<Path>> exact = new ArrayList<>();
                     List<GazoVaultService.SimilarPair> similar = new ArrayList<>();
-                    Map<Path, String> shaCache = new HashMap<>();
-                    Map<Path, Long> dHashCache = new HashMap<>();
+                    Map<Path, String> shaCache = new ConcurrentHashMap<>();
+                    Map<Path, Long> dHashCache = new ConcurrentHashMap<>();
+                    AtomicLong donePairsAtomic = new AtomicLong(0L);
 
-                    for (int i = 0; i < total; i++) {
-                        updateMessage("類似チェック中: " + i + " / " + total + "  (比較 " + donePairs + " / " + totalPairs + ")");
-                        Path current = images.get(i);
-                        String shaCurrent = shaCache.computeIfAbsent(current, p -> {
-                            try {
-                                return vault.sha256(p);
-                            } catch (IOException e) {
-                                return "";
-                            }
-                        });
-                        Long dhCurrent = dHashCache.computeIfAbsent(current, vault::dHash64);
-                        List<Path> exactMatches = new ArrayList<>();
-                        List<GazoVaultService.SimilarPair> similarMatches = new ArrayList<>();
-
-                        for (int j = i + 1; j < total; j++) {
-                            Path other = images.get(j);
-                            donePairs++;
-                            if ((donePairs & 255L) == 0L || donePairs == totalPairs) {
-                                updateMessage("類似チェック中: " + i + " / " + total + "  (比較 " + donePairs + " / " + totalPairs + ")");
-                            }
-                            String shaOther = shaCache.computeIfAbsent(other, p -> {
-                                try {
-                                    return vault.sha256(p);
-                                } catch (IOException e) {
-                                    return "";
+                    int parallelism = Math.min(8, Math.max(1, Runtime.getRuntime().availableProcessors()));
+                    ExecutorService exec = Executors.newFixedThreadPool(parallelism, r -> {
+                        Thread t = new Thread(r, "gazo-dup-scan");
+                        t.setDaemon(true);
+                        return t;
+                    });
+                    record DuplicateScanRowResult(List<Path> exactMatches, List<GazoVaultService.SimilarPair> similarMatches) {}
+                    List<Future<DuplicateScanRowResult>> rowFutures = new ArrayList<>();
+                    try {
+                        for (int i = 0; i < total; i++) {
+                            final int iFinal = i;
+                            rowFutures.add(exec.submit(() -> {
+                                Path current = images.get(iFinal);
+                                String shaCurrent = shaCache.computeIfAbsent(current, p -> {
+                                    try {
+                                        return vault.sha256(p);
+                                    } catch (IOException e) {
+                                        return "";
+                                    }
+                                });
+                                Long dhCurrent = dHashCache.computeIfAbsent(current, vault::dHash64);
+                                List<Path> exactMatches = new ArrayList<>();
+                                List<GazoVaultService.SimilarPair> similarMatches = new ArrayList<>();
+                                for (int j = iFinal + 1; j < total; j++) {
+                                    Path other = images.get(j);
+                                    long d = donePairsAtomic.incrementAndGet();
+                                    if ((d & 255L) == 0L || d == totalPairs) {
+                                        long now = System.currentTimeMillis();
+                                        long prev = lastPairProgressMsgMs.get();
+                                        if (d == totalPairs || now - prev >= 200L) {
+                                            lastPairProgressMsgMs.set(now);
+                                            updateMessage("類似チェック中: 比較 " + d + " / " + totalPairs);
+                                        }
+                                    }
+                                    String shaOther = shaCache.computeIfAbsent(other, p -> {
+                                        try {
+                                            return vault.sha256(p);
+                                        } catch (IOException e) {
+                                            return "";
+                                        }
+                                    });
+                                    if (!shaCurrent.isEmpty() && shaCurrent.equals(shaOther)) {
+                                        exactMatches.add(other);
+                                    }
+                                    Long dhOther = dHashCache.computeIfAbsent(other, vault::dHash64);
+                                    if (dhCurrent != null && dhOther != null) {
+                                        int dist = Long.bitCount(dhCurrent ^ dhOther);
+                                        if (dist <= threshold) {
+                                            similarMatches.add(new GazoVaultService.SimilarPair(current, other, dist));
+                                        }
+                                    }
                                 }
-                            });
-                            if (!shaCurrent.isEmpty() && shaCurrent.equals(shaOther)) {
-                                exactMatches.add(other);
-                            }
-
-                            Long dhOther = dHashCache.computeIfAbsent(other, vault::dHash64);
-                            if (dhCurrent != null && dhOther != null) {
-                                int dist = Long.bitCount(dhCurrent ^ dhOther);
-                                if (dist <= threshold) {
-                                    similarMatches.add(new GazoVaultService.SimilarPair(current, other, dist));
-                                }
-                            }
+                                return new DuplicateScanRowResult(exactMatches, similarMatches);
+                            }));
                         }
+
+                        for (int i = 0; i < total; i++) {
+                        DuplicateScanRowResult row = rowFutures.get(i).get();
+                        List<Path> exactMatches = row.exactMatches();
+                        List<GazoVaultService.SimilarPair> similarMatches = row.similarMatches();
+                        Path current = images.get(i);
 
                         if (!exactMatches.isEmpty()) {
                             List<Path> group = new ArrayList<>();
@@ -2152,35 +2235,16 @@ public final class GazoApp extends Application {
                         if (!similarMatches.isEmpty()) {
                             similar.addAll(similarMatches);
                         }
-                        if (!exactMatches.isEmpty() || !similarMatches.isEmpty()) {
-                            List<List<Path>> exactSnapshot = new ArrayList<>(exact);
-                            List<GazoVaultService.SimilarPair> similarSnapshot = new ArrayList<>(similar);
-                            // 同一クラスタ（連結成分）は代表1件だけ。マッチが出た画像を都度足すと同一類似が複数行になるため、グラフから集約する。
-                            List<Path> candidateSnapshot = collectDuplicateCandidates(exactSnapshot, similarSnapshot);
-                            Platform.runLater(() -> {
-                                similarRef.set(similarSnapshot);
-                                exactGroupsRef.set(exactSnapshot);
-                                reportArea.setText(buildDuplicateReport(exactSnapshot, similarSnapshot, threshold));
-                                candidateList.getItems().setAll(candidateSnapshot);
-                                if (!candidateSnapshot.isEmpty()) {
-                                    busyPane.setVisible(false);
-                                    busyPane.setManaged(false);
-                                }
-                                Path pending = pendingSelectAfterDupScanRef.getAndSet(null);
-                                Path selected = candidateList.getSelectionModel().getSelectedItem();
-                                if (pending != null && candidateList.getItems().contains(pending)) {
-                                    candidateList.getSelectionModel().select(pending);
-                                    selected = pending;
-                                } else if (selected == null && !candidateSnapshot.isEmpty()) {
-                                    candidateList.getSelectionModel().select(0);
-                                    selected = candidateList.getSelectionModel().getSelectedItem();
-                                }
-                                selectedRef.set(selected);
-                                updateDuplicatePreview(selected, exactSnapshot, similarSnapshot, leftPreview, leftLabel, othersRow, othersHeaderLabel);
-                                refreshExactGroupKeepUi.run();
-                            });
+                        // 途中経過の runLater で ListView/プレビューを更新すると Linux/GTK で負荷・警告が増えるため、
+                        // 完了時の1回だけ反映する。
+                        long now = System.currentTimeMillis();
+                        if (now - lastRowProgressMsgMs >= 200L || i == total - 1) {
+                            lastRowProgressMsgMs = now;
+                            updateMessage("類似チェック中: " + (i + 1) + " / " + total + "  (比較 " + donePairsAtomic.get() + " / " + totalPairs + ")");
                         }
-                        updateMessage("類似チェック中: " + (i + 1) + " / " + total + "  (比較 " + donePairs + " / " + totalPairs + ")");
+                        }
+                    } finally {
+                        exec.shutdown();
                     }
                     similar.sort(Comparator.comparingInt(GazoVaultService.SimilarPair::distance));
                     List<List<Path>> exactFinal = new ArrayList<>(exact);
@@ -2191,16 +2255,22 @@ public final class GazoApp extends Application {
                         exactGroupsRef.set(exactFinal);
                         reportArea.setText(buildDuplicateReport(exactFinal, similarFinal, threshold));
                         candidateList.getItems().setAll(finalCandidates);
-                        busyPane.setVisible(false);
-                        busyPane.setManaged(false);
+                        Path pending = pendingSelectAfterDupScanRef.getAndSet(null);
                         Path selected = candidateList.getSelectionModel().getSelectedItem();
-                        if (selected == null && !finalCandidates.isEmpty()) {
+                        if (pending != null && finalCandidates.contains(pending)) {
+                            candidateList.getSelectionModel().select(pending);
+                            selected = pending;
+                        } else if (selected == null && !finalCandidates.isEmpty()) {
                             candidateList.getSelectionModel().select(0);
                             selected = candidateList.getSelectionModel().getSelectedItem();
                         }
                         selectedRef.set(selected);
                         updateDuplicatePreview(selected, exactFinal, similarFinal, leftPreview, leftLabel, othersRow, othersHeaderLabel);
                         refreshExactGroupKeepUi.run();
+                        Platform.runLater(() -> {
+                            busyPane.setVisible(false);
+                            busyPane.setManaged(false);
+                        });
                     });
                     return null;
                 }
@@ -2208,30 +2278,34 @@ public final class GazoApp extends Application {
             busyLabel.textProperty().unbind();
             busyLabel.textProperty().bind(task.messageProperty());
             scanStatusLabel.textProperty().unbind();
-            scanStatusLabel.textProperty().bind(task.messageProperty());
-            task.setOnSucceeded(ev -> {
+            // message を二重に bind すると更新のたびにレイアウトが二重に走り GTK と相性が悪い。オーバーレイ側のみ bind する。
+            // タスク完了直後に unbind + オーバーレイ非表示をすると Linux/GTK で
+            // XSetErrorHandler 警告が出ることがあるため、イベント処理の外に出す（二重 runLater）。
+            task.setOnSucceeded(ev -> Platform.runLater(() -> Platform.runLater(() -> {
                 duplicateScanRunning.set(false);
                 busyLabel.textProperty().unbind();
-                scanStatusLabel.textProperty().unbind();
                 busyPane.setVisible(false);
                 busyPane.setManaged(false);
                 scanStatusLabel.setText("類似チェック完了");
                 setDuplicateBusy.run();
+                // call() 側の最終 runLater が先に走ると、まだ duplicateScanRunning==true のまま refresh されて
+                // merge ボタンが無効のまま残る。スキャン終了後にもう一度だけ更新する。
+                refreshExactGroupKeepUi.run();
                 if (duplicateScanRerunRequested.getAndSet(false)) {
                     Runnable rr = refreshAsyncRef.get();
                     if (rr != null) {
                         rr.run();
                     }
                 }
-            });
-            task.setOnFailed(ev -> {
+            })));
+            task.setOnFailed(ev -> Platform.runLater(() -> Platform.runLater(() -> {
                 duplicateScanRunning.set(false);
                 busyLabel.textProperty().unbind();
-                scanStatusLabel.textProperty().unbind();
                 busyPane.setVisible(false);
                 busyPane.setManaged(false);
                 scanStatusLabel.setText("");
                 setDuplicateBusy.run();
+                refreshExactGroupKeepUi.run();
                 Throwable ex = task.getException();
                 String msg = ex != null && ex.getMessage() != null ? ex.getMessage() : "不明なエラー";
                 GazoFx.showError("類似チェックエラー", msg);
@@ -2241,7 +2315,7 @@ public final class GazoApp extends Application {
                         rr.run();
                     }
                 }
-            });
+            })));
             Thread t = new Thread(task, "gazo-duplicate-scan");
             t.setDaemon(true);
             t.start();
@@ -2260,8 +2334,7 @@ public final class GazoApp extends Application {
                 GazoFx.showWarn("削除", "削除対象にできる候補がありません。");
                 return;
             }
-            Window owner = dialog.getDialogPane().getScene().getWindow();
-            runMergeDeleteFlow(owner, keep, others, "削除する候補の選択", "重複・類似候補削除の確認", "重複・類似候補削除エラー", true, pendingSelectAfterDupScanRef, refreshAsync);
+            runMergeDeleteFlow(primaryStage, keep, others, "削除する候補の選択", "重複・類似候補削除の確認", "重複・類似候補削除エラー", true, pendingSelectAfterDupScanRef, refreshAsync);
         });
         rerunButton.setOnAction(e -> refreshAsync.run());
         candidateList.getSelectionModel().selectedItemProperty().addListener((obs, oldV, newV) -> {
@@ -2275,20 +2348,49 @@ public final class GazoApp extends Application {
                 setDuplicateBusy.run();
             });
         });
-        enlargeCompareButton.setOnAction(e -> {
+        enlargeCompareButton.setOnAction(e -> Platform.runLater(() -> {
+            if (duplicateScanRunning.get()) {
+                GazoFx.showWarn("比較表示", "類似チェックが終わるまでお待ちください。");
+                return;
+            }
             Path selected = selectedRef.get();
             List<DuplicateOther> others = duplicateOthersOrdered(selected, exactGroupsRef.get(), similarRef.get());
-            Window owner = dialog.getDialogPane().getScene().getWindow();
-            // ボタンイベントの最中に showAndWait しないように 1 パルス遅らせる（Linux/GTK 警告回避）。
-            Platform.runLater(() -> showDuplicateExpandDialog(owner, selected, others));
+            showDuplicateExpandOverlay(expandOverlayPane, selected, others);
+        }));
+
+        dupCloseButton.setOnAction(e -> {
+            duplicateReportOverlay.setVisible(false);
+            duplicateReportOverlay.setManaged(false);
+            flushPendingDeletes(true);
+            refreshTagFilterOptions();
+            refreshGallery();
+            refreshVideoList();
+        });
+
+        ScrollPane dupScroll = new ScrollPane(dupShell);
+        dupScroll.setFitToWidth(true);
+        dupScroll.setPannable(false);
+        dupScroll.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+
+        duplicateReportOverlay = new StackPane(dupScroll);
+        duplicateReportOverlay.setStyle("-fx-background-color: rgba(255,255,255,0.98);");
+        duplicateReportOverlay.setVisible(true);
+        duplicateReportOverlay.setManaged(true);
+        duplicateReportOverlay.setMaxSize(Double.MAX_VALUE, Double.MAX_VALUE);
+        StackPane.setAlignment(dupScroll, Pos.TOP_CENTER);
+
+        duplicateReportRefreshAction = refreshAsync;
+        mainRootStack.getChildren().add(duplicateReportOverlay);
+        duplicateReportOverlay.toFront();
+        duplicateReportOverlay.addEventFilter(KeyEvent.KEY_PRESSED, e -> {
+            if (e.getCode() == KeyCode.ESCAPE) {
+                dupCloseButton.fire();
+                e.consume();
+            }
         });
 
         refreshAsync.run();
-        dialog.showAndWait();
-        flushPendingDeletes(true);
-        refreshTagFilterOptions();
-        refreshGallery();
-        refreshVideoList();
+        Platform.runLater(() -> duplicateReportOverlay.requestFocus());
     }
 
     private void runMergeDeleteFlow(
@@ -2607,6 +2709,18 @@ public final class GazoApp extends Application {
         return sortPathsByImageAreaDesc(representatives);
     }
 
+    /** サムネ用ファイルの生バイト（I/O のみ。JavaFX {@link Image} は必ず FX スレッドで生成する）。 */
+    private byte[] readThumbnailFileBytes(Path path) throws IOException {
+        Path source = path;
+        if (vault != null) {
+            Path thumb = vault.thumbnailFor(path);
+            if (thumb != null) {
+                source = thumb;
+            }
+        }
+        return Files.readAllBytes(source);
+    }
+
     private Image loadThumbnail(Path path, int width, int height) {
         Path source = path;
         if (vault != null) {
@@ -2881,7 +2995,8 @@ public final class GazoApp extends Application {
         return tile;
     }
 
-    private void showDuplicateExpandDialog(Window owner, Path selected, List<DuplicateOther> others) {
+    /** 別ウィンドウは出さず、類似チェックダイアログ内の {@link StackPane} に重ねる（Linux/GTK 警告回避）。 */
+    private void showDuplicateExpandOverlay(StackPane expandOverlay, Path selected, List<DuplicateOther> others) {
         if (selected == null) {
             GazoFx.showWarn("比較表示", "候補画像を選択してください。");
             return;
@@ -2890,13 +3005,18 @@ public final class GazoApp extends Application {
             GazoFx.showWarn("比較表示", "表示できる他の候補がありません。");
             return;
         }
-        Dialog<Void> dialog = new Dialog<>();
-        if (owner != null) {
-            dialog.initOwner(owner);
-        }
-        dialog.setTitle("重複・類似一覧");
-        dialog.setResizable(true);
-        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        Runnable close = () -> {
+            expandOverlay.setVisible(false);
+            expandOverlay.setManaged(false);
+            expandOverlay.getChildren().clear();
+        };
+
+        expandOverlay.getChildren().clear();
+        Region backdrop = new Region();
+        backdrop.setStyle("-fx-background-color: rgba(0,0,0,0.35);");
+        backdrop.setMaxWidth(Double.MAX_VALUE);
+        backdrop.setMaxHeight(Double.MAX_VALUE);
+        backdrop.setOnMouseClicked(e -> close.run());
 
         HBox row = new HBox(16);
         row.setAlignment(Pos.CENTER_LEFT);
@@ -2910,10 +3030,24 @@ public final class GazoApp extends Application {
         scroll.setPrefViewportWidth(920);
         scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
         scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
-        VBox root = new VBox(scroll);
-        root.setPadding(new Insets(10));
-        dialog.getDialogPane().setContent(root);
-        dialog.showAndWait();
+        Button closeBtn = new Button("閉じる");
+        closeBtn.setOnAction(ev -> close.run());
+        HBox bottom = new HBox(closeBtn);
+        bottom.setAlignment(Pos.CENTER_RIGHT);
+        bottom.setPadding(new Insets(8, 0, 0, 0));
+        Label title = new Label("重複・類似一覧");
+        title.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
+        VBox panel = new VBox(10, title, scroll, bottom);
+        panel.setPadding(new Insets(14));
+        panel.setStyle("-fx-background-color: #f8f6f0; -fx-background-radius: 8;");
+        panel.setMaxWidth(960);
+        panel.setMaxHeight(640);
+
+        expandOverlay.getChildren().addAll(backdrop, panel);
+        StackPane.setAlignment(panel, Pos.CENTER);
+        expandOverlay.setMouseTransparent(false);
+        expandOverlay.setVisible(true);
+        expandOverlay.setManaged(true);
     }
 
     private VBox buildDuplicateExpandTile(Path path, Integer distanceOrNull, boolean isSelected) {
@@ -2927,12 +3061,21 @@ public final class GazoApp extends Application {
         cap.setMaxWidth(340);
         cap.setStyle("-fx-font-size: 12px;");
         galleryImageLoadExecutor.execute(() -> {
-            Image thumb = loadThumbnail(path, 320, 320);
+            byte[] raw;
+            try {
+                raw = readThumbnailFileBytes(path);
+            } catch (IOException ex) {
+                raw = null;
+            }
             int[] wh = readImagePixelDimensionsImageIo(path);
+            final byte[] rawFinal = raw;
+            final int[] whFinal = wh;
             Platform.runLater(() -> {
-                iv.setImage(thumb);
-                if (wh != null) {
-                    cap.setText(path.getFileName().toString() + "\n" + wh[0] + "×" + wh[1] + "\n" + line3);
+                if (rawFinal != null && rawFinal.length > 0) {
+                    iv.setImage(new Image(new ByteArrayInputStream(rawFinal), 320, 320, true, true));
+                }
+                if (whFinal != null) {
+                    cap.setText(path.getFileName().toString() + "\n" + whFinal[0] + "×" + whFinal[1] + "\n" + line3);
                 } else {
                     cap.setText(path.getFileName().toString() + "\n" + formatImagePixelSize(path) + "\n" + line3);
                 }
