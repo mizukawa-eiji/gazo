@@ -801,6 +801,147 @@ public final class GazoVaultService implements AutoCloseable {
         return names;
     }
 
+    /**
+     * 各画像ファイル名が、どのキャンバスレイアウトの選択一覧に含まれるか（保存済みデータに基づく）。
+     * 値はレイアウト名の集合（複数キャンバスに同じファイルがある場合あり）。
+     */
+    public Map<String, Set<String>> mapCanvasLayoutsByFileName() throws IOException {
+        Map<String, Set<String>> out = new HashMap<>();
+        for (String layout : listCanvasLayouts()) {
+            for (Path p : listCanvasSelectionOrder(layout)) {
+                String fn = p.getFileName().toString();
+                out.computeIfAbsent(fn, k -> new LinkedHashSet<>()).add(layout);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * 類似統合で削除する画像を残す画像に置き換えるとき、全キャンバスで
+     * 選択一覧のファイル名を差し替え、位置・拡大・回転・一覧用表示サイズを削除側から引き継ぐ（残す側に既に値がある場合は上書き）。
+     * 実ファイル削除の前に呼ぶこと。
+     */
+    public void substituteCanvasImageReferences(Path replacement, Path removed) throws IOException {
+        Objects.requireNonNull(replacement, "replacement");
+        Objects.requireNonNull(removed, "removed");
+        String rep = replacement.getFileName().toString();
+        String rem = removed.getFileName().toString();
+        if (rep.equals(rem)) {
+            return;
+        }
+        ensureUnlocked();
+
+        Properties canvasProps = loadCanvasProperties();
+        boolean canvasChanged = false;
+        for (String key : new ArrayList<>(canvasProps.stringPropertyNames())) {
+            if (key.endsWith("::__canvas_selection__")) {
+                String raw = canvasProps.getProperty(key, "").trim();
+                if (raw.isEmpty() || !csvContainsFilenameToken(raw, rem)) {
+                    continue;
+                }
+                String newRaw = substituteFilenameInCanvasSelectionCsv(raw, rem, rep);
+                if (newRaw.isEmpty()) {
+                    canvasProps.remove(key);
+                } else {
+                    canvasProps.setProperty(key, newRaw);
+                }
+                canvasChanged = true;
+            }
+        }
+        String legacy = canvasProps.getProperty(CANVAS_SELECTION_KEY, "").trim();
+        if (!legacy.isEmpty() && csvContainsFilenameToken(legacy, rem)) {
+            String newL = substituteFilenameInCanvasSelectionCsv(legacy, rem, rep);
+            if (newL.isEmpty()) {
+                canvasProps.remove(CANVAS_SELECTION_KEY);
+            } else {
+                canvasProps.setProperty(CANVAS_SELECTION_KEY, newL);
+            }
+            canvasChanged = true;
+        }
+
+        String remPosSuffix = "::" + rem;
+        for (String key : new ArrayList<>(canvasProps.stringPropertyNames())) {
+            if (!key.endsWith(remPosSuffix)) {
+                continue;
+            }
+            if (key.endsWith("::__canvas_selection__") || key.endsWith("::__canvas_size__")) {
+                continue;
+            }
+            String val = canvasProps.getProperty(key);
+            String layout = key.substring(0, key.length() - remPosSuffix.length());
+            canvasProps.setProperty(canvasKey(layout, rep), val);
+            canvasProps.remove(key);
+            canvasChanged = true;
+        }
+
+        if (canvasChanged) {
+            saveCanvasProperties(canvasProps);
+        }
+
+        Properties transformProps = loadCanvasTransformProperties();
+        boolean transformChanged = false;
+        String remTfSuffix = "::" + rem;
+        for (String key : new ArrayList<>(transformProps.stringPropertyNames())) {
+            if (!key.endsWith(remTfSuffix)) {
+                continue;
+            }
+            String val = transformProps.getProperty(key);
+            String layout = key.substring(0, key.length() - remTfSuffix.length());
+            transformProps.setProperty(canvasKey(layout, rep), val);
+            transformProps.remove(key);
+            transformChanged = true;
+        }
+        if (transformChanged) {
+            saveCanvasTransformProperties(transformProps);
+        }
+
+        Properties displayProps = loadDisplayProperties();
+        if (displayProps.containsKey(rem)) {
+            displayProps.setProperty(rep, displayProps.getProperty(rem));
+            displayProps.remove(rem);
+            saveDisplayProperties(displayProps);
+        }
+    }
+
+    private static boolean csvContainsFilenameToken(String raw, String fileName) {
+        for (String part : raw.split(",")) {
+            if (part.trim().equals(fileName)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * CSV の各トークンが rem のものは rep に置換し、同一ファイル名が重複したら先頭の 1 件にまとめる。
+     */
+    private static String substituteFilenameInCanvasSelectionCsv(String raw, String rem, String rep) {
+        List<String> parts = new ArrayList<>();
+        for (String part : raw.split(",")) {
+            String t = part.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            if (t.equals(rem)) {
+                t = rep;
+            }
+            parts.add(t);
+        }
+        List<String> out = new ArrayList<>();
+        boolean seenRep = false;
+        for (String t : parts) {
+            if (t.equals(rep)) {
+                if (!seenRep) {
+                    out.add(rep);
+                    seenRep = true;
+                }
+            } else {
+                out.add(t);
+            }
+        }
+        return String.join(",", out);
+    }
+
     public void deleteCanvasLayout(String layoutName) throws IOException {
         if (layoutName == null || layoutName.isBlank() || DEFAULT_CANVAS_LAYOUT.equals(layoutName)) {
             return;

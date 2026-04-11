@@ -10,14 +10,21 @@ import javafx.geometry.Pos;
 import javafx.scene.Group;
 import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
+import javafx.collections.FXCollections;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBar;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContentDisplay;
+import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.control.SelectionMode;
 import javafx.scene.control.Slider;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.Tab;
@@ -30,10 +37,12 @@ import javafx.scene.control.SpinnerValueFactory;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseButton;
+import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
 import javafx.scene.transform.Scale;
@@ -46,8 +55,15 @@ import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -58,11 +74,28 @@ public final class CanvasHubDialog {
     private CanvasHubDialog() {
     }
 
+    /** ツールバー用: 絵文字／記号＋ツールチップのみ（ラベルなし）。 */
+    private static void setCanvasHubIconButton(Button button, String glyph, String tooltipText) {
+        Text g = new Text(glyph);
+        g.setStyle("-fx-font-size: 16px; -fx-font-family: 'Segoe UI Emoji', 'Segoe UI Symbol', 'Segoe UI', sans-serif;");
+        button.setGraphic(g);
+        button.setContentDisplay(ContentDisplay.GRAPHIC_ONLY);
+        button.setText(null);
+        Tooltip.install(button, new Tooltip(tooltipText));
+    }
+
     public static void open(GazoApp app, Stage owner) {
-        open(app, owner, false);
+        open(app, owner, false, null);
     }
 
     public static void open(GazoApp app, Stage owner, boolean openRandomTabOnStart) {
+        open(app, owner, openRandomTabOnStart, null);
+    }
+
+    /**
+     * @param initialLayoutNameOrNull メイン「キャンバス」タブのプレビューと同じ名前で開きたいとき。存在しない名前や null のときは従来どおり default 等を選ぶ。
+     */
+    public static void open(GazoApp app, Stage owner, boolean openRandomTabOnStart, String initialLayoutNameOrNull) {
     if (!app.listCheckedSelection.isEmpty()) {
         app.canvasSelection.clear();
         app.canvasSelection.addAll(app.listCheckedSelection);
@@ -78,20 +111,34 @@ public final class CanvasHubDialog {
     hubStage.setMinHeight(420);
 
     AtomicReference<String> currentLayout = new AtomicReference<>("default");
+    AtomicBoolean suppressLayoutChooser = new AtomicBoolean(false);
 
-    Button overwriteSaveButton = new Button("上書き保存");
+    Button overwriteSaveButton = new Button();
+    setCanvasHubIconButton(overwriteSaveButton, "💾", "上書き保存（現在のキャンバス一覧を Vault に記録）");
     overwriteSaveButton.setOnAction(e -> app.persistCanvasSelectionToVaultWithFeedback(currentLayout.get()));
+
+    Button addImagesButton = new Button();
+    setCanvasHubIconButton(
+            addImagesButton,
+            "➕",
+            "画像を追加（ダイアログ内でファイル名・タグで絞り込み、一覧から選んで現在のキャンバスに追加）");
+
+    Button canvasSizeButton = new Button();
+    setCanvasHubIconButton(
+            canvasSizeButton,
+            "⤢",
+            "キャンバスサイズ（幅・高さを数値指定。右下の取っ手でも可。Shift+ドラッグで素早く広げられる）");
 
     Button slideshowButton = new Button("スライドショー");
     slideshowButton.setOnAction(e -> app.showSlideshow(owner));
 
     Label hubHint = new Label(
-            "ギャラリーで「キャンバス対象」をチェックするか、「ランダムピック」タブで「名前を付けて保存…」からキャンバスに取り込みます。"
-                    + "「キャンバス編集」タブのツールバーから「上書き保存」で、現在のキャンバスの画像一覧を Vault に記録します。"
-                    + "キャンバス名タブを切り替えると、切り替え前のキャンバスの一覧は自動で保存されます。"
+            "ギャラリーで「キャンバス対象」をチェックするか、「キャンバス編集」の「画像を追加…」／「ランダムピック」の「名前を付けて保存…」からキャンバスに取り込みます。"
+                    + "ツールバーの「上書き保存」で、現在のキャンバスの画像一覧を Vault に記録します。"
+                    + "上部の「キャンバス」一覧で編集対象を切り替えると、切り替え前のキャンバスは自動で保存されます。"
                     + "ダイアログを閉じるだけでは、最後に表示していたキャンバスの一覧は保存されないので、閉じる前に「上書き保存」してください。"
                     + "「名前を付けて保存…」は現在の内容を保存したうえで別名のキャンバスを複製します。"
-                    + "キャンバス編集で位置・回転を調整し、スライドショーで全体を表示できます。");
+                    + "画像の拡大・回転は右クリックメニューまたはホイールで調整できます。");
     hubHint.setWrapText(true);
     hubHint.setMaxWidth(1000);
     hubHint.setStyle("-fx-text-fill: #555;");
@@ -117,38 +164,44 @@ public final class CanvasHubDialog {
     Pane editCanvas = new Pane();
     editCanvas.setPrefSize(1100, 760);
     editCanvas.setStyle("-fx-background-color: linear-gradient(to bottom, #f0ede4, #e4dccb);");
-    TabPane layoutTabs = new TabPane();
-    layoutTabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+    ComboBox<String> layoutChooser = new ComboBox<>();
+    layoutChooser.setPrefWidth(220);
+    layoutChooser.setTooltip(new Tooltip("編集するキャンバス（保存済みレイアウト）を選びます"));
+    try {
+        List<String> layoutNames = new ArrayList<>(app.vault.listCanvasLayouts());
+        if (!layoutNames.contains("default")) {
+            layoutNames.add(0, "default");
+        }
+        layoutChooser.getItems().setAll(layoutNames);
+        String initialLayout;
+        if (initialLayoutNameOrNull != null
+                && !initialLayoutNameOrNull.isBlank()
+                && layoutNames.contains(initialLayoutNameOrNull)) {
+            initialLayout = initialLayoutNameOrNull;
+        } else {
+            initialLayout = layoutNames.contains("default") ? "default" : layoutNames.get(0);
+        }
+        layoutChooser.setValue(initialLayout);
+        currentLayout.set(initialLayout);
+    } catch (IOException e) {
+        GazoFx.showError("キャンバス読込エラー", e.getMessage());
+        layoutChooser.getItems().setAll("default");
+        layoutChooser.setValue("default");
+        currentLayout.set("default");
+    }
     ComboBox<String> presetCombo = new ComboBox<>();
     Slider overlapSlider = new Slider(0, 100, 50);
     Slider neatSlider = new Slider(0, 100, 50);
-    Button newLayoutButton = new Button("名前を付けて保存…");
-    Button autoLayoutButton = new Button("自動レイアウト");
-
-    try {
-        for (String name : app.vault.listCanvasLayouts()) {
-            Tab t = new Tab(name);
-            t.setClosable(false);
-            layoutTabs.getTabs().add(t);
-        }
-    } catch (IOException e) {
-        GazoFx.showError("キャンバス読込エラー", e.getMessage());
-    }
-    if (layoutTabs.getTabs().stream().noneMatch(t -> "default".equals(t.getText()))) {
-        Tab t = new Tab("default");
-        t.setClosable(false);
-        layoutTabs.getTabs().add(t);
-    }
-    Tab initialTab = layoutTabs.getTabs().stream()
-            .filter(t -> "default".equals(t.getText()))
-            .findFirst()
-            .orElse(layoutTabs.getTabs().isEmpty() ? null : layoutTabs.getTabs().get(0));
-    if (initialTab != null) {
-        layoutTabs.getSelectionModel().select(initialTab);
-    }
-    Label layoutNameLabel = new Label();
-    layoutNameLabel.setStyle("-fx-font-size: 14px; -fx-font-weight: bold; -fx-text-fill: #3a3833;");
-    Runnable updateLayoutNameLabel = () -> layoutNameLabel.setText("キャンバス名「" + currentLayout.get() + "」");
+    Button newLayoutButton = new Button();
+    setCanvasHubIconButton(
+            newLayoutButton,
+            "📄",
+            "名前を付けて保存（現在の内容を保存したうえで、別名のキャンバスとして複製）");
+    Button autoLayoutButton = new Button();
+    setCanvasHubIconButton(
+            autoLayoutButton,
+            "▦",
+            "自動レイアウト（プリセット・重なり・整列感に従って配置し直す）");
     presetCombo.getItems().setAll(GazoApp.LAYOUT_PRESETS);
     presetCombo.setValue("コラージュ風");
     overlapSlider.setPrefWidth(120);
@@ -175,7 +228,9 @@ public final class CanvasHubDialog {
         try {
             var size = app.vault.getCanvasSize(currentLayout.get());
             if (size != null) {
-                editCanvas.setPrefSize(Math.max(900, size.width()), Math.max(700, size.height()));
+                editCanvas.setPrefSize(
+                        Math.max(GazoApp.CANVAS_EDIT_MIN_WIDTH, size.width()),
+                        Math.max(GazoApp.CANVAS_EDIT_MIN_HEIGHT, size.height()));
             } else {
                 editCanvas.setPrefSize(2000, 1400);
             }
@@ -195,6 +250,7 @@ public final class CanvasHubDialog {
     editScroll.setFitToHeight(true);
     editScroll.setPrefViewportWidth(1100);
     editScroll.setPrefViewportHeight(760);
+    StackPane editScrollStack = new StackPane(editScroll);
     Runnable updateEditCanvasFit = () -> {
         Bounds vb = editScroll.getViewportBounds();
         double vw = vb.getWidth();
@@ -252,29 +308,42 @@ public final class CanvasHubDialog {
                     }
                     app.refreshGallery();
                     refreshEditor.get().run();
+                },
+                transformPath -> {
+                },
+                path -> {
+                    app.bringCanvasImageToFront(path, currentLayout.get());
+                    refreshEditor.get().run();
                 });
         Platform.runLater(updateEditCanvasFit);
     };
     refreshEditor.set(render);
 
+    addImagesButton.setOnAction(e -> showAddImagesToCanvasDialog(app, hubStage, currentLayout, refreshEditor));
+    canvasSizeButton.setOnAction(
+            e -> showEditCanvasSizeDialog(hubStage, editCanvas, saveCanvasSize, updateEditCanvasFit, refreshEditor));
+
+    layoutChooser.valueProperty().addListener((obs, oldV, newV) -> {
+        if (suppressLayoutChooser.get()) {
+            return;
+        }
+        if (oldV != null && !Objects.equals(oldV, newV)) {
+            app.persistCanvasSelectionToVault(oldV);
+        }
+        String selected = newV == null ? "default" : newV;
+        currentLayout.set(selected);
+        app.reloadCanvasSelectionFromVault(currentLayout.get());
+        selectedCanvasImage.set(null);
+        applyCanvasSize.run();
+        refreshEditor.get().run();
+    });
+
     Runnable onEditResizeFinished = () -> {
         saveCanvasSize.run();
         Platform.runLater(updateEditCanvasFit);
     };
-    app.installCanvasResizeHandle(editCanvas, onEditResizeFinished);
+    app.installCanvasResizeHandle(editScrollStack, editCanvas, onEditResizeFinished);
 
-    layoutTabs.getSelectionModel().selectedItemProperty().addListener((obs, oldTab, newTab) -> {
-        if (oldTab != null) {
-            app.persistCanvasSelectionToVault(oldTab.getText());
-        }
-        String selected = newTab == null ? "default" : newTab.getText();
-        currentLayout.set(selected == null ? "default" : selected);
-        app.reloadCanvasSelectionFromVault(currentLayout.get());
-        selectedCanvasImage.set(null);
-        applyCanvasSize.run();
-        render.run();
-        updateLayoutNameLabel.run();
-    });
     newLayoutButton.setOnAction(e -> {
         app.persistCanvasSelectionToVault(currentLayout.get());
         TextInputDialog input = new TextInputDialog();
@@ -289,7 +358,7 @@ public final class CanvasHubDialog {
         if (layout.isEmpty()) {
             return;
         }
-        boolean exists = layoutTabs.getTabs().stream().anyMatch(t -> layout.equals(t.getText()));
+        boolean exists = layoutChooser.getItems().contains(layout);
         if (!exists) {
             String sourceLayout = currentLayout.get();
             try {
@@ -298,33 +367,52 @@ public final class CanvasHubDialog {
                 GazoFx.showError("名前を付けて保存エラー", ex.getMessage());
                 return;
             }
-            Tab tab = new Tab(layout);
-            tab.setClosable(false);
-            layoutTabs.getTabs().add(tab);
+            suppressLayoutChooser.set(true);
+            try {
+                layoutChooser.getItems().add(layout);
+                layoutChooser.setValue(layout);
+                currentLayout.set(layout);
+            } finally {
+                suppressLayoutChooser.set(false);
+            }
             refreshCanvasList.get().run();
             GazoFx.showWarn("名前を付けて保存", "「" + layout + "」として保存しました（「" + sourceLayout + "」の内容を複製）。");
+            app.reloadCanvasSelectionFromVault(layout);
+            applyCanvasSize.run();
+            refreshEditor.get().run();
+        } else {
+            suppressLayoutChooser.set(true);
+            try {
+                layoutChooser.setValue(layout);
+                currentLayout.set(layout);
+            } finally {
+                suppressLayoutChooser.set(false);
+            }
+            app.reloadCanvasSelectionFromVault(layout);
+            applyCanvasSize.run();
+            refreshEditor.get().run();
         }
-        layoutTabs.getTabs().stream()
-                .filter(t -> layout.equals(t.getText()))
-                .findFirst()
-                .ifPresent(t -> layoutTabs.getSelectionModel().select(t));
     });
     Runnable deleteActiveLayout = () -> {
-        Tab selectedTab = layoutTabs.getSelectionModel().getSelectedItem();
-        String selected = selectedTab == null ? null : selectedTab.getText();
+        String selected = layoutChooser.getValue();
         if (selected == null || "default".equals(selected)) {
             GazoFx.showWarn("削除不可", "default キャンバスは削除できません。");
             return;
         }
         try {
             app.vault.deleteCanvasLayout(selected);
-            layoutTabs.getTabs().removeIf(t -> selected.equals(t.getText()));
+            suppressLayoutChooser.set(true);
+            try {
+                layoutChooser.getItems().remove(selected);
+                layoutChooser.setValue("default");
+                currentLayout.set("default");
+            } finally {
+                suppressLayoutChooser.set(false);
+            }
             refreshCanvasList.get().run();
-            layoutTabs.getTabs().stream()
-                    .filter(t -> "default".equals(t.getText()))
-                    .findFirst()
-                    .ifPresent(t -> layoutTabs.getSelectionModel().select(t));
             app.reloadCanvasSelectionFromVault("default");
+            applyCanvasSize.run();
+            refreshEditor.get().run();
         } catch (IOException ex) {
             GazoFx.showError("キャンバス削除エラー", ex.getMessage());
         }
@@ -344,7 +432,15 @@ public final class CanvasHubDialog {
         app.applyCanvasFileNameVisibility(randomCanvasRef.get());
     });
 
-    HBox editToolBarPrimary = new HBox(12, layoutNameLabel, overwriteSaveButton, newLayoutButton);
+    HBox editToolBarPrimary =
+            new HBox(
+                    12,
+                    new Label("キャンバス"),
+                    layoutChooser,
+                    overwriteSaveButton,
+                    newLayoutButton,
+                    addImagesButton,
+                    canvasSizeButton);
     editToolBarPrimary.setPadding(new Insets(8, 12, 8, 12));
     editToolBarPrimary.setAlignment(Pos.CENTER_LEFT);
     editToolBarPrimary.setStyle(
@@ -370,16 +466,15 @@ public final class CanvasHubDialog {
             "-fx-background-color: rgba(255,255,255,0.65); -fx-border-color: #e7e2d8; -fx-border-width: 0 0 1 0;");
 
     Label editHelp = new Label(
-            "操作: 画像をドラッグで移動 / ホイールで拡大縮小 / Shift+ホイールで回転 / 右クリックで削除。"
-                    + " 右下ハンドルでキャンバスサイズ変更。");
+            "操作: 画像をドラッグで移動 / ホイールで拡大縮小 / Shift+ホイールで回転 / 右クリックで拡大・回転スライダー・前面表示・除去。"
+                    + " キャンバス全体の広さは「キャンバスサイズ…」で数値指定するか、編集エリア右下の取っ手をドラッグ（Shift+ドラッグで素早く変更）。");
     editHelp.setWrapText(true);
     editHelp.setStyle("-fx-text-fill: #666; -fx-font-size: 11px;");
     editHelp.setPadding(new Insets(2, 12, 10, 12));
 
-    VBox editorVBox = new VBox(8, layoutTabs, editToolBarPrimary, editToolBarControls, editScroll, editHelp);
-    VBox.setVgrow(editScroll, Priority.ALWAYS);
+    VBox editorVBox = new VBox(8, editToolBarPrimary, editToolBarControls, editScrollStack, editHelp);
+    VBox.setVgrow(editScrollStack, Priority.ALWAYS);
     editTab.setContent(editorVBox);
-    updateLayoutNameLabel.run();
 
     Tab randomTab = new Tab("ランダムピック");
     randomTab.setClosable(false);
@@ -473,17 +568,28 @@ public final class CanvasHubDialog {
                 GazoFx.showError("名前を付けて保存エラー", ex.getMessage());
                 return;
             }
-            boolean exists = layoutTabs.getTabs().stream().anyMatch(t -> newLayout.equals(t.getText()));
+            boolean exists = layoutChooser.getItems().contains(newLayout);
             if (!exists) {
-                Tab tab = new Tab(newLayout);
-                tab.setClosable(false);
-                layoutTabs.getTabs().add(tab);
+                suppressLayoutChooser.set(true);
+                try {
+                    layoutChooser.getItems().add(newLayout);
+                    layoutChooser.setValue(newLayout);
+                    currentLayout.set(newLayout);
+                } finally {
+                    suppressLayoutChooser.set(false);
+                }
                 refreshCanvasList.get().run();
+            } else {
+                suppressLayoutChooser.set(true);
+                try {
+                    layoutChooser.setValue(newLayout);
+                    currentLayout.set(newLayout);
+                } finally {
+                    suppressLayoutChooser.set(false);
+                }
             }
-            layoutTabs.getTabs().stream()
-                    .filter(t -> newLayout.equals(t.getText()))
-                    .findFirst()
-                    .ifPresent(t -> layoutTabs.getSelectionModel().select(t));
+            app.reloadCanvasSelectionFromVault(newLayout);
+            applyCanvasSize.run();
             app.autoLayoutCanvas(
                     editCanvas,
                     newLayout,
@@ -564,16 +670,20 @@ public final class CanvasHubDialog {
         if (selectedName == null || selectedName.isBlank()) {
             return;
         }
-        layoutTabs.getTabs().stream()
-                .filter(t -> selectedName.equals(t.getText()))
-                .findFirst()
-                .ifPresent(t -> {
-                    layoutTabs.getSelectionModel().select(t);
-                    TabPane tp = tabsRef.get();
-                    if (tp != null) {
-                        tp.getSelectionModel().select(editTab);
-                    }
-                });
+        suppressLayoutChooser.set(true);
+        try {
+            layoutChooser.setValue(selectedName);
+            currentLayout.set(selectedName);
+        } finally {
+            suppressLayoutChooser.set(false);
+        }
+        app.reloadCanvasSelectionFromVault(selectedName);
+        applyCanvasSize.run();
+        refreshEditor.get().run();
+        TabPane tp = tabsRef.get();
+        if (tp != null) {
+            tp.getSelectionModel().select(editTab);
+        }
     };
     SplitPane listSplit = new SplitPane();
     listSplit.setOrientation(Orientation.HORIZONTAL);
@@ -625,10 +735,13 @@ public final class CanvasHubDialog {
                     return;
                 }
                 getListView().getSelectionModel().select(name);
-                layoutTabs.getTabs().stream()
-                        .filter(t -> name.equals(t.getText()))
-                        .findFirst()
-                        .ifPresent(t -> layoutTabs.getSelectionModel().select(t));
+                suppressLayoutChooser.set(true);
+                try {
+                    layoutChooser.setValue(name);
+                    currentLayout.set(name);
+                } finally {
+                    suppressLayoutChooser.set(false);
+                }
                 deleteActiveLayout.run();
             });
             actions.getChildren().addAll(editBtn, delBtn);
@@ -683,12 +796,32 @@ public final class CanvasHubDialog {
 
     refreshCanvasList.set(() -> {
         String current = canvasListView.getSelectionModel().getSelectedItem();
-        List<String> names = layoutTabs.getTabs().stream().map(Tab::getText).toList();
-        canvasListView.getItems().setAll(names);
-        if (current != null && names.contains(current)) {
-            canvasListView.getSelectionModel().select(current);
-        } else if (!names.isEmpty()) {
-            canvasListView.getSelectionModel().select(names.get(0));
+        try {
+            List<String> names = new ArrayList<>(app.vault.listCanvasLayouts());
+            String layoutPick = layoutChooser.getValue();
+            suppressLayoutChooser.set(true);
+            try {
+                layoutChooser.getItems().setAll(names);
+                if (layoutPick != null && names.contains(layoutPick)) {
+                    layoutChooser.setValue(layoutPick);
+                } else if (!names.isEmpty()) {
+                    layoutChooser.setValue(names.get(0));
+                }
+                String v = layoutChooser.getValue();
+                if (v != null) {
+                    currentLayout.set(v);
+                }
+            } finally {
+                suppressLayoutChooser.set(false);
+            }
+            canvasListView.getItems().setAll(names);
+            if (current != null && names.contains(current)) {
+                canvasListView.getSelectionModel().select(current);
+            } else if (!names.isEmpty()) {
+                canvasListView.getSelectionModel().select(names.get(0));
+            }
+        } catch (IOException ex) {
+            GazoFx.showWarn("キャンバス一覧", ex.getMessage());
         }
         renderCanvasPreview.run();
     });
@@ -720,6 +853,7 @@ public final class CanvasHubDialog {
         }
     });
 
+    app.reloadCanvasSelectionFromVault(currentLayout.get());
     applyCanvasSize.run();
     render.run();
     randomBootstrap.run();
@@ -732,5 +866,218 @@ public final class CanvasHubDialog {
         Platform.runLater(updateEditCanvasFit);
     });
     hubStage.showAndWait();
+    }
+
+    private static void showEditCanvasSizeDialog(
+            Stage owner,
+            Pane editCanvas,
+            Runnable saveCanvasSize,
+            Runnable updateEditCanvasFit,
+            AtomicReference<Runnable> refreshEditor) {
+        int curW = (int) Math.round(editCanvas.getPrefWidth());
+        int curH = (int) Math.round(editCanvas.getPrefHeight());
+        int minW = (int) Math.round(GazoApp.CANVAS_EDIT_MIN_WIDTH);
+        int minH = (int) Math.round(GazoApp.CANVAS_EDIT_MIN_HEIGHT);
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(owner);
+        dialog.setTitle("キャンバスサイズ");
+        dialog.setHeaderText("作業エリアの幅・高さ（ピクセル）を指定します。");
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(12, 16, 12, 16));
+        Spinner<Integer> wSpin = new Spinner<>();
+        wSpin.setValueFactory(
+                new SpinnerValueFactory.IntegerSpinnerValueFactory(minW, 12000, Math.max(minW, curW), 10));
+        Spinner<Integer> hSpin = new Spinner<>();
+        hSpin.setValueFactory(
+                new SpinnerValueFactory.IntegerSpinnerValueFactory(minH, 12000, Math.max(minH, curH), 10));
+        wSpin.setEditable(true);
+        hSpin.setEditable(true);
+        wSpin.setPrefWidth(104);
+        hSpin.setPrefWidth(104);
+        grid.add(new Label("幅（px）"), 0, 0);
+        grid.add(wSpin, 1, 0);
+        grid.add(new Label("高さ（px）"), 0, 1);
+        grid.add(hSpin, 1, 1);
+        Label hint = new Label("右下の取っ手でも変更できます。Shift を押しながらドラッグすると、一回り広げやすくなります。");
+        hint.setWrapText(true);
+        hint.setMaxWidth(340);
+        hint.setStyle("-fx-text-fill: #666; -fx-font-size: 11px;");
+        grid.add(hint, 0, 2, 2, 1);
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().setAll(ButtonType.OK, ButtonType.CANCEL);
+        dialog.setResultConverter(bt -> bt == ButtonType.OK ? ButtonType.OK : null);
+        Optional<ButtonType> opt = dialog.showAndWait();
+        if (opt.isEmpty() || opt.get() != ButtonType.OK) {
+            return;
+        }
+        int nw = Math.max(minW, wSpin.getValue());
+        int nh = Math.max(minH, hSpin.getValue());
+        editCanvas.setPrefSize(nw, nh);
+        saveCanvasSize.run();
+        Platform.runLater(updateEditCanvasFit);
+        refreshEditor.get().run();
+    }
+
+    private static void showAddImagesToCanvasDialog(
+            GazoApp app,
+            Stage owner,
+            AtomicReference<String> currentLayoutRef,
+            AtomicReference<Runnable> refreshEditor) {
+        List<String> allTagNames;
+        try {
+            if (app.vault.listImages().isEmpty()) {
+                GazoFx.showWarn("画像を追加", "Vault に画像がありません。");
+                return;
+            }
+            allTagNames = new ArrayList<>(app.vault.listAllTags());
+            Collections.sort(allTagNames);
+        } catch (IOException e) {
+            GazoFx.showError("画像を追加", e.getMessage());
+            return;
+        }
+
+        Dialog<List<Path>> dialog = new Dialog<>();
+        dialog.initOwner(owner);
+        dialog.setTitle("キャンバスに画像を追加");
+        dialog.setHeaderText("ファイル名・タグで絞り込みできます（Ctrl／Shift で複数選択）。");
+
+        TextField nameField = new TextField();
+        nameField.setPromptText("ファイル名に含まれる文字（部分一致・大文字小文字無視）");
+        nameField.setText(app.galleryImageNameQuery());
+
+        LinkedHashMap<String, CheckBox> tagChecks = new LinkedHashMap<>();
+        CheckBox untaggedCb = new CheckBox("タグなし");
+        tagChecks.put(GazoApp.TAG_FILTER_UNTAGGED, untaggedCb);
+        for (String t : allTagNames) {
+            tagChecks.put(t, new CheckBox(t));
+        }
+        Set<String> initialTags = app.galleryActiveTagFiltersCopy();
+        for (Map.Entry<String, CheckBox> e : tagChecks.entrySet()) {
+            e.getValue().setSelected(initialTags.contains(e.getKey()));
+        }
+
+        VBox tagBox = new VBox(4);
+        tagBox.getChildren().add(untaggedCb);
+        for (String t : allTagNames) {
+            tagBox.getChildren().add(tagChecks.get(t));
+        }
+        ScrollPane tagScroll = new ScrollPane(tagBox);
+        tagScroll.setFitToWidth(true);
+        tagScroll.setMaxHeight(160);
+        tagScroll.setMinHeight(80);
+
+        ListView<Path> listView = new ListView<>();
+        listView.setItems(FXCollections.observableArrayList());
+        listView.setFixedCellSize(66);
+        listView.setCellFactory(lv -> new ListCell<Path>() {
+            private final ImageView thumb = new ImageView();
+            private final Label name = new Label();
+            private final HBox row = new HBox(10, thumb, name);
+
+            {
+                thumb.setFitWidth(56);
+                thumb.setFitHeight(56);
+                thumb.setPreserveRatio(true);
+                thumb.setSmooth(true);
+                name.setMaxWidth(360);
+                name.setWrapText(false);
+                HBox.setHgrow(name, Priority.ALWAYS);
+                row.setAlignment(Pos.CENTER_LEFT);
+            }
+
+            @Override
+            protected void updateItem(Path item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setGraphic(null);
+                    return;
+                }
+                name.setText(item.getFileName().toString());
+                Image im = app.thumbnailForPicker(item, 112, 112);
+                thumb.setImage(im);
+                setGraphic(row);
+            }
+        });
+        listView.getSelectionModel().setSelectionMode(SelectionMode.MULTIPLE);
+
+        Label countLabel = new Label();
+        countLabel.setStyle("-fx-text-fill: #555;");
+
+        Runnable applyFilter =
+                () -> {
+                    try {
+                        LinkedHashSet<String> sel = new LinkedHashSet<>();
+                        for (Map.Entry<String, CheckBox> e : tagChecks.entrySet()) {
+                            if (e.getValue().isSelected()) {
+                                sel.add(e.getKey());
+                            }
+                        }
+                        List<Path> paths = app.listImagesForCanvasAddPicker(sel, nameField.getText());
+                        listView.getItems().setAll(paths);
+                        countLabel.setText("表示 " + paths.size() + " 件");
+                    } catch (IOException ex) {
+                        GazoFx.showError("画像を追加", ex.getMessage());
+                    }
+                };
+
+        nameField.textProperty().addListener((obs, o, n) -> applyFilter.run());
+        for (CheckBox cb : tagChecks.values()) {
+            cb.selectedProperty().addListener((obs, o, n) -> applyFilter.run());
+        }
+        applyFilter.run();
+
+        VBox content =
+                new VBox(
+                        8,
+                        new Label("ファイル名"),
+                        nameField,
+                        new Label("タグ（複数選択はすべて含む AND）"),
+                        tagScroll,
+                        countLabel,
+                        listView);
+        VBox.setVgrow(listView, Priority.ALWAYS);
+        content.setPrefWidth(520);
+        content.setMinHeight(420);
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().setPrefWidth(560);
+        dialog.getDialogPane().setPrefHeight(580);
+        ButtonType addType = new ButtonType("追加", ButtonBar.ButtonData.OK_DONE);
+        ButtonType cancelType = new ButtonType("キャンセル", ButtonBar.ButtonData.CANCEL_CLOSE);
+        dialog.getDialogPane().getButtonTypes().setAll(addType, cancelType);
+        dialog.setResultConverter(btn -> btn == addType ? new ArrayList<>(listView.getSelectionModel().getSelectedItems()) : null);
+        Optional<List<Path>> result = dialog.showAndWait();
+        if (result.isEmpty()) {
+            return;
+        }
+        List<Path> chosen = result.get();
+        if (chosen == null) {
+            return;
+        }
+        if (chosen.isEmpty()) {
+            GazoFx.showWarn("画像を追加", "追加する画像を選択してください。");
+            return;
+        }
+        boolean any = false;
+        for (Path p : chosen) {
+            if (!app.canvasSelection.contains(p)) {
+                app.canvasSelection.add(p);
+                any = true;
+            }
+        }
+        if (!any) {
+            GazoFx.showWarn("画像を追加", "選択した画像はすべてすでにキャンバスに含まれています。");
+            return;
+        }
+        String layoutName = currentLayoutRef.get();
+        try {
+            app.vault.saveCanvasSelectionOrder(layoutName, new ArrayList<>(app.canvasSelection));
+        } catch (IOException ex) {
+            GazoFx.showError("画像を追加", ex.getMessage());
+            return;
+        }
+        app.refreshGallery();
+        refreshEditor.get().run();
     }
 }

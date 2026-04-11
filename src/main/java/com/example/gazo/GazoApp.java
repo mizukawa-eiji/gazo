@@ -11,6 +11,7 @@ import javafx.concurrent.Task;
 import javafx.geometry.Bounds;
 import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
+import javafx.geometry.Point2D;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.Cursor;
@@ -69,7 +70,9 @@ import javafx.scene.input.MouseButton;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.ScrollEvent;
 import javafx.scene.input.TransferMode;
+import javafx.scene.input.ZoomEvent;
 import javafx.scene.text.Text;
 import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
@@ -152,6 +155,8 @@ public final class GazoApp extends Application {
     /** 現在の一覧モデル（フィルター後の全パス）。仮想ウィンドウはこれの一部だけを FlowPane に載せる。 */
     private List<Path> galleryModelPaths = List.of();
     private Map<String, Set<String>> galleryTagMap = Map.of();
+    /** ファイル名 → その画像が載っているキャンバス名（保存済み）。ギャラリー・類似チェックの表示用。 */
+    private Map<String, Set<String>> galleryCanvasLayoutsByFileName = Map.of();
     /** 仮想ウィンドウ再構築中は高さリスナーなどの再入を防ぐ。 */
     private boolean galleryVirtualRebuilding;
     private int galleryVirtualLastFirstIndex = Integer.MIN_VALUE;
@@ -232,8 +237,8 @@ public final class GazoApp extends Application {
     private String imageNameQuery = "";
     static final List<String> LAYOUT_PRESETS = List.of("コラージュ風", "整列風");
     private static final List<String> LIST_VIEW_SIZE_OPTIONS = List.of("小", "中", "大");
-    /** タグ絞り込みで「タグなし」を表す。実タグ名としては使わない。 */
-    private static final String TAG_FILTER_UNTAGGED = "__gazo_untagged__";
+    /** タグ絞り込みで「タグなし」を表す。実タグ名としては使わない。キャンバス追加ダイアログからも参照する。 */
+    static final String TAG_FILTER_UNTAGGED = "__gazo_untagged__";
     final Set<Path> canvasSelection = new LinkedHashSet<>();
     final Set<Path> listCheckedSelection = new LinkedHashSet<>();
     /** 実ファイル削除を遅延させる予約セット。重複整理ダイアログ終了時・アプリ終了時にまとめて削除する。 */
@@ -243,6 +248,7 @@ public final class GazoApp extends Application {
     /** メイン「キャンバス」タブのプレビュー縮小表示用（ビューポートに合わせる） */
     private ScrollPane homeCanvasPreviewScroll;
     private Pane homeCanvasPreviewPane;
+    private Label homeCanvasLayoutLabel;
     private Scale homeCanvasPreviewScale;
     private Group homeCanvasPreviewHolder;
 
@@ -516,14 +522,28 @@ public final class GazoApp extends Application {
                 Platform.runLater(this::fitHomeCanvasPreview);
             }
         });
-        Label homeCanvasLayoutLabel = new Label("—");
+        homeCanvasLayoutLabel = new Label("—");
         homeCanvasLayoutLabel.setStyle("-fx-font-weight: bold;");
         Button homeCanvasShuffleButton = new Button("別のキャンバス");
         homeCanvasShuffleButton.setOnAction(e -> refreshRandomCanvasPreview(homeCanvasPane, homeCanvasLayoutLabel, true));
         Button homeCanvasSlideshowButton = new Button("スライドショーで開く");
         homeCanvasSlideshowButton.setOnAction(e ->
                 showSlideshow(stage, parseHomeCanvasLayoutName(homeCanvasLayoutLabel)));
-        HBox homeCanvasBar = new HBox(12, new Label("キャンバス:"), homeCanvasLayoutLabel, homeCanvasShuffleButton, homeCanvasSlideshowButton);
+        Button homeCanvasEditButton = new Button("キャンバス編集で開く");
+        homeCanvasEditButton.setTooltip(
+                new Tooltip("キャンバスウィンドウを「キャンバス編集」タブで開きます（プレビュー中のキャンバスを初期選択）。"));
+        homeCanvasEditButton.setOnAction(e -> {
+            CanvasHubDialog.open(this, stage, false, parseHomeCanvasLayoutName(homeCanvasLayoutLabel));
+            refreshHomeCanvasPreviewAfterHubClose();
+        });
+        HBox homeCanvasBar =
+                new HBox(
+                        12,
+                        new Label("キャンバス:"),
+                        homeCanvasLayoutLabel,
+                        homeCanvasShuffleButton,
+                        homeCanvasSlideshowButton,
+                        homeCanvasEditButton);
         homeCanvasBar.setAlignment(Pos.CENTER_LEFT);
         homeCanvasBar.setPadding(new Insets(8, 10, 8, 10));
         homeCanvasBar.setStyle(
@@ -1006,7 +1026,7 @@ public final class GazoApp extends Application {
                 canvas.setMaxSize(2000, 1400);
                 canvas.setClip(new Rectangle(2000, 1400));
             }
-            renderCanvasItems(canvas, name, false, null, null, null);
+            renderCanvasItems(canvas, name, false, null, null, null, null, null);
             Platform.runLater(fitCanvas);
         };
         Runnable prev = () -> {
@@ -1210,6 +1230,7 @@ public final class GazoApp extends Application {
         galleryVirtualFirstTileMinY = -1;
         try {
             galleryTagMap = vault.tagsByFileName();
+            galleryCanvasLayoutsByFileName = new HashMap<>(vault.mapCanvasLayoutsByFileName());
             List<Path> allImages = vault.listImages();
             List<Path> paths = listFilteredImages(galleryTagMap, allImages);
             galleryModelPaths = new ArrayList<>(paths);
@@ -1677,7 +1698,14 @@ public final class GazoApp extends Application {
      * 1つ以上なら AND。{@link #TAG_FILTER_UNTAGGED} が含まれる場合は「タグが1つも付いていない」ことを要求する。
      */
     private boolean matchesTagFilter(Set<String> fileTags) {
-        if (activeTagFilters.isEmpty()) {
+        return matchesTagFilterSet(activeTagFilters, fileTags);
+    }
+
+    /**
+     * メイン画面のタグ欄と同じ AND／「タグなし」ルール。キャンバス追加ダイアログなどメインとは独立した条件セット用。
+     */
+    static boolean matchesTagFilterSet(Set<String> activeTagFilters, Set<String> fileTags) {
+        if (activeTagFilters == null || activeTagFilters.isEmpty()) {
             return true;
         }
         boolean wantUntagged = activeTagFilters.contains(TAG_FILTER_UNTAGGED);
@@ -1690,6 +1718,42 @@ public final class GazoApp extends Application {
             return requiredTags.isEmpty();
         }
         return fileTags.containsAll(requiredTags);
+    }
+
+    /**
+     * キャンバス「画像を追加」ダイアログ用。メインのタグ／検索欄とは独立して一覧を絞り込む。
+     *
+     * @param tagFilters 空ならタグでは絞らない。要素は実タグ名または {@link #TAG_FILTER_UNTAGGED}。
+     */
+    List<Path> listImagesForCanvasAddPicker(Set<String> tagFilters, String filenameQuery) throws IOException {
+        Map<String, Set<String>> tagsByFile = vault.tagsByFileName();
+        List<Path> allImages = vault.listImages();
+        String q = filenameQuery == null ? "" : filenameQuery.trim().toLowerCase();
+        List<Path> out = new ArrayList<>();
+        for (Path p : allImages) {
+            if (isPendingDelete(p)) {
+                continue;
+            }
+            Set<String> tags = tagsByFile.getOrDefault(p.getFileName().toString(), Set.of());
+            if (!matchesTagFilterSet(tagFilters, tags)) {
+                continue;
+            }
+            if (!q.isEmpty() && !p.getFileName().toString().toLowerCase().contains(q)) {
+                continue;
+            }
+            out.add(p);
+        }
+        return out;
+    }
+
+    /** キャンバス追加ダイアログの初期値用（メインの検索欄）。 */
+    String galleryImageNameQuery() {
+        return imageNameQuery;
+    }
+
+    /** キャンバス追加ダイアログの初期値用（メインのタグチェック）。 */
+    LinkedHashSet<String> galleryActiveTagFiltersCopy() {
+        return new LinkedHashSet<>(activeTagFilters);
     }
 
     private BooleanProperty tagFilterBooleanProperty(String tag) {
@@ -2126,6 +2190,25 @@ public final class GazoApp extends Application {
         StackPane.setAlignment(canvasPickCheck, Pos.TOP_LEFT);
         StackPane.setMargin(canvasPickCheck, new Insets(6, 0, 0, 6));
         photoArea.getChildren().add(canvasPickCheck);
+
+        Set<String> canvasLayouts =
+                galleryCanvasLayoutsByFileName.getOrDefault(imagePath.getFileName().toString(), Set.of());
+        if (!canvasLayouts.isEmpty()) {
+            List<String> sortedLayouts = new ArrayList<>(canvasLayouts);
+            Collections.sort(sortedLayouts);
+            String tipText = "キャンバスに登録: " + String.join(", ", sortedLayouts);
+            String shortMark = sortedLayouts.size() == 1 ? sortedLayouts.get(0) : sortedLayouts.size() + "件";
+            if (shortMark.length() > 12) {
+                shortMark = shortMark.substring(0, 11) + "…";
+            }
+            Label canvasRegBadge = new Label(shortMark);
+            canvasRegBadge.setTooltip(new Tooltip(tipText));
+            canvasRegBadge.setStyle(
+                    "-fx-background-color: rgba(238,232,220,0.95); -fx-text-fill: #4a4030; -fx-font-size: 10px; -fx-padding: 2 5;");
+            StackPane.setAlignment(canvasRegBadge, Pos.TOP_RIGHT);
+            StackPane.setMargin(canvasRegBadge, new Insets(6, 6, 0, 0));
+            photoArea.getChildren().add(canvasRegBadge);
+        }
 
         VBox card = new VBox(photoArea, caption);
         card.setAlignment(Pos.TOP_CENTER);
@@ -2595,6 +2678,15 @@ public final class GazoApp extends Application {
             openDuplicateReportStage.requestFocus();
             return;
         }
+        try {
+            if (vault != null) {
+                galleryCanvasLayoutsByFileName = new HashMap<>(vault.mapCanvasLayoutsByFileName());
+            } else {
+                galleryCanvasLayoutsByFileName = Map.of();
+            }
+        } catch (IOException e) {
+            galleryCanvasLayoutsByFileName = Map.of();
+        }
 
         Stage dupStage = new Stage();
         dupStage.setTitle("重複/類似チェック");
@@ -2688,12 +2780,23 @@ public final class GazoApp extends Application {
                         return;
                     }
                     String base = rowPath.getFileName().toString() + "  " + formatImagePixelSize(rowPath);
+                    List<String> onCanvas =
+                            new ArrayList<>(
+                                    galleryCanvasLayoutsByFileName.getOrDefault(
+                                            rowPath.getFileName().toString(), Set.of()));
+                    Collections.sort(onCanvas);
+                    String canvasSuffix = onCanvas.isEmpty() ? "" : "  [キャンバス]";
                     if (duplicateMergeRemovedMarkPaths.contains(rowPath)) {
-                        text.setText(base + " （類似削除済み）");
+                        text.setText(base + " （類似削除済み）" + canvasSuffix);
                         text.setStyle("-fx-text-fill: #888;");
                     } else {
-                        text.setText(base);
+                        text.setText(base + canvasSuffix);
                         text.setStyle(null);
+                    }
+                    if (onCanvas.isEmpty()) {
+                        text.setTooltip(null);
+                    } else {
+                        text.setTooltip(new Tooltip("キャンバスに登録: " + String.join(", ", onCanvas)));
                     }
                     thumb.setImage(loadThumbnail(rowPath, 44, 44));
                 });
@@ -2705,6 +2808,8 @@ public final class GazoApp extends Application {
         leftPreview.setFitHeight(220);
         leftPreview.setPreserveRatio(true);
         Label leftLabel = new Label("選択画像");
+        leftLabel.setWrapText(true);
+        leftLabel.setMaxWidth(400);
         Label othersHeaderLabel = new Label("重複・類似候補");
         HBox othersRow = new HBox(10);
         othersRow.setAlignment(Pos.CENTER_LEFT);
@@ -2860,7 +2965,6 @@ public final class GazoApp extends Application {
                             .toList();
                     int total = images.size();
                     long totalPairs = (long) total * (long) Math.max(0, total - 1) / 2L;
-                    final long scanStartMs = System.currentTimeMillis();
                     updateMessage("類似チェック中: 0 / " + total + "  (比較 0 / " + totalPairs + ")");
                     long lastRowProgressMsgMs = 0L;
                     AtomicLong lastPairProgressMsgMs = new AtomicLong(0L);
@@ -2903,8 +3007,7 @@ public final class GazoApp extends Application {
                                         long prev = lastPairProgressMsgMs.get();
                                         if (d == totalPairs || now - prev >= 200L) {
                                             lastPairProgressMsgMs.set(now);
-                                            updateMessage("類似チェック中: 比較 " + d + " / " + totalPairs
-                                                    + dupScanEtaSuffix(d, totalPairs, scanStartMs));
+                                            updateMessage("類似チェック中: 比較 " + d + " / " + totalPairs);
                                         }
                                     }
                                     String shaOther = shaCache.computeIfAbsent(other, p -> {
@@ -2952,8 +3055,7 @@ public final class GazoApp extends Application {
                         if (now - lastRowProgressMsgMs >= 200L || i == total - 1) {
                             lastRowProgressMsgMs = now;
                             long dp = donePairsAtomic.get();
-                            updateMessage("類似チェック中: " + (i + 1) + " / " + total + "  (比較 " + dp + " / " + totalPairs + ")"
-                                    + dupScanEtaSuffix(dp, totalPairs, scanStartMs));
+                            updateMessage("類似チェック中: " + (i + 1) + " / " + total + "  (比較 " + dp + " / " + totalPairs + ")");
                         }
                         }
                     } finally {
@@ -3268,6 +3370,7 @@ public final class GazoApp extends Application {
                 sb.append(toDelete.get(i).getFileName());
             }
             sb.append("\n削除した画像のタグは、残す画像に追加されます。");
+            sb.append("\nキャンバスに載っている場合は、削除側の位置・拡大・回転・一覧の表示サイズを残す画像に引き継ぎます。");
             sb.append("\n実際のファイル削除は、この画面を閉じるとき（またはアプリ終了時）にまとめて実行されます。");
             try {
                 LinkedHashSet<String> mergedForConfirm = new LinkedHashSet<>(parseUserTags(keepTagsField.getText()));
@@ -3295,6 +3398,9 @@ public final class GazoApp extends Application {
                     merged.addAll(vault.getTags(p));
                 }
                 vault.setTags(keep, merged);
+                for (Path p : toDelete) {
+                    vault.substituteCanvasImageReferences(keep, p);
+                }
                 markPendingDelete(toDelete);
                 refreshTagFilterOptions();
                 refreshGallery();
@@ -3304,39 +3410,6 @@ public final class GazoApp extends Application {
                 GazoFx.showError(errorTitle, ex.getMessage());
             }
         });
-    }
-
-    /**
-     * 比較済みペア数と経過時間から残り時間を線形推定し、プログレス文面に付ける。
-     */
-    private static String dupScanEtaSuffix(long donePairs, long totalPairs, long startMs) {
-        if (totalPairs <= 0 || donePairs <= 0 || donePairs >= totalPairs) {
-            return "";
-        }
-        long elapsedMs = System.currentTimeMillis() - startMs;
-        if (elapsedMs < 500L) {
-            return "";
-        }
-        long remainingPairs = totalPairs - donePairs;
-        double etaSec = remainingPairs * (elapsedMs / 1000.0) / donePairs;
-        if (Double.isNaN(etaSec) || Double.isInfinite(etaSec)) {
-            return "";
-        }
-        long sec = (long) Math.ceil(etaSec);
-        if (sec <= 0L) {
-            return "  あと1秒未満";
-        }
-        if (sec < 60L) {
-            return "  あと約 " + sec + " 秒";
-        }
-        if (sec < 3600L) {
-            long m = sec / 60L;
-            long s = sec % 60L;
-            return "  あと約 " + m + " 分 " + s + " 秒";
-        }
-        long h = sec / 3600L;
-        long m = (sec % 3600L) / 60L;
-        return "  あと約 " + h + " 時間 " + m + " 分";
     }
 
     private String buildDuplicateReport(
@@ -3830,6 +3903,13 @@ public final class GazoApp extends Application {
         return Files.readAllBytes(source);
     }
 
+    /**
+     * キャンバス追加ダイアログなど、Vault サムネを使ったプレビュー用。
+     */
+    public Image thumbnailForPicker(Path path, int width, int height) {
+        return loadThumbnail(path, width, height);
+    }
+
     private Image loadThumbnail(Path path, int width, int height) {
         Path source = path;
         if (vault != null) {
@@ -4148,7 +4228,14 @@ public final class GazoApp extends Application {
 
         othersRow.getChildren().clear();
         leftPreview.setImage(loadThumbnail(sel, 220, 220));
-        leftLabel.setText("選択: " + sel.getFileName() + "  " + formatImagePixelSize(sel));
+        List<String> selCanvasLayouts =
+                new ArrayList<>(galleryCanvasLayoutsByFileName.getOrDefault(sel.getFileName().toString(), Set.of()));
+        Collections.sort(selCanvasLayouts);
+        String selLine = "選択: " + sel.getFileName() + "  " + formatImagePixelSize(sel);
+        if (!selCanvasLayouts.isEmpty()) {
+            selLine += "\nキャンバス: " + String.join(", ", selCanvasLayouts);
+        }
+        leftLabel.setText(selLine);
         othersHeaderLabel.setText("他の候補 (" + orderedOthers.size() + " 件)");
         if (orderedOthers.isEmpty()) {
             Label empty = new Label("なし");
@@ -4216,17 +4303,40 @@ public final class GazoApp extends Application {
         }
     }
 
+    /**
+     * 類似チェックのサムネ列・拡大表示用。キャンバス未登録なら null。
+     */
+    private Label buildDuplicateCanvasLineLabel(Path path, double maxWidth) {
+        List<String> cv =
+                new ArrayList<>(galleryCanvasLayoutsByFileName.getOrDefault(path.getFileName().toString(), Set.of()));
+        Collections.sort(cv);
+        if (cv.isEmpty()) {
+            return null;
+        }
+        Label L = new Label("キャンバス: " + String.join(", ", cv));
+        L.setWrapText(true);
+        L.setMaxWidth(maxWidth);
+        L.setStyle("-fx-font-size: 11px; -fx-text-fill: #5a5340;");
+        return L;
+    }
+
     private VBox buildDuplicatePreviewTile(DuplicateOther o) {
-        ImageView iv = new ImageView(loadThumbnail(o.path(), 120, 120));
+        Path p = o.path();
+        ImageView iv = new ImageView(loadThumbnail(p, 120, 120));
         iv.setPreserveRatio(true);
         iv.setFitWidth(120);
         iv.setFitHeight(120);
         String line3 = formatDHashDistanceLabel(o.distance(), o.sameByteIdentityAsReference());
-        Label cap = new Label(o.path().getFileName().toString() + "\n" + formatImagePixelSize(o.path()) + "\n" + line3);
+        Label cap = new Label(p.getFileName().toString() + "\n" + formatImagePixelSize(p) + "\n" + line3);
         cap.setWrapText(true);
         cap.setMaxWidth(136);
         cap.setStyle("-fx-font-size: 11px;");
         VBox tile = new VBox(4, iv, cap);
+        Label canvasLine = buildDuplicateCanvasLineLabel(p, 136);
+        if (canvasLine != null) {
+            canvasLine.setStyle("-fx-font-size: 10px; -fx-text-fill: #5a5340;");
+            tile.getChildren().add(canvasLine);
+        }
         tile.setStyle("-fx-padding: 6; -fx-background-color: #f8f6f0; -fx-background-radius: 4;");
         tile.setFocusTraversable(false);
         iv.setFocusTraversable(false);
@@ -4301,6 +4411,11 @@ public final class GazoApp extends Application {
         cap.setWrapText(true);
         cap.setMaxWidth(340);
         cap.setStyle("-fx-font-size: 12px;");
+        Label canvasLine = buildDuplicateCanvasLineLabel(path, 340);
+        VBox column = new VBox(8, cap, iv);
+        if (canvasLine != null) {
+            column.getChildren().add(canvasLine);
+        }
         galleryImageLoadExecutor.execute(() -> {
             byte[] raw;
             try {
@@ -4322,7 +4437,7 @@ public final class GazoApp extends Application {
                 }
             });
         });
-        return new VBox(8, cap, iv);
+        return column;
     }
 
     /**
@@ -4330,10 +4445,70 @@ public final class GazoApp extends Application {
      */
     private void showCanvasHubDialog(Stage owner) {
         CanvasHubDialog.open(this, owner);
+        refreshHomeCanvasPreviewAfterHubClose();
     }
 
     private void showCanvasHubDialogRandom(Stage owner) {
         CanvasHubDialog.open(this, owner, true);
+        refreshHomeCanvasPreviewAfterHubClose();
+    }
+
+    /**
+     * キャンバス Hub を閉じたあと、メイン「キャンバス」タブのプレビューを Vault の最新内容で描き直す。
+     * 表示中のキャンバス名が分かるときはそのレイアウトのみ再読込し、無効なら従来どおりランダム 1 件を表示する。
+     */
+    private void refreshHomeCanvasPreviewAfterHubClose() {
+        if (vault == null || homeCanvasPreviewPane == null || homeCanvasLayoutLabel == null) {
+            return;
+        }
+        try {
+            Set<String> names = vault.listCanvasLayouts();
+            if (names.isEmpty()) {
+                homeCanvasPreviewPane.getChildren().clear();
+                homeCanvasLayoutLabel.setText("（キャンバスがありません）");
+                if (homeCanvasPreviewScale != null) {
+                    homeCanvasPreviewScale.setX(1);
+                    homeCanvasPreviewScale.setY(1);
+                }
+                if (homeCanvasPreviewHolder != null) {
+                    homeCanvasPreviewHolder.setLayoutX(0);
+                    homeCanvasPreviewHolder.setLayoutY(0);
+                }
+                Platform.runLater(this::fitHomeCanvasPreview);
+                return;
+            }
+            String layoutName = parseHomeCanvasLayoutName(homeCanvasLayoutLabel);
+            if (layoutName == null || !names.contains(layoutName)) {
+                refreshRandomCanvasPreview(homeCanvasPreviewPane, homeCanvasLayoutLabel, false);
+                return;
+            }
+            renderHomeCanvasPreviewForLayout(homeCanvasPreviewPane, homeCanvasLayoutLabel, layoutName);
+        } catch (IOException e) {
+            GazoFx.showError("キャンバス表示", e.getMessage());
+        }
+    }
+
+    private void renderHomeCanvasPreviewForLayout(Pane canvasPane, Label layoutNameLabel, String layoutName)
+            throws IOException {
+        List<Path> backup = new ArrayList<>(canvasSelection);
+        try {
+            canvasSelection.clear();
+            canvasSelection.addAll(vault.listCanvasSelectionOrder(layoutName));
+            var size = vault.getCanvasSize(layoutName);
+            if (size != null) {
+                double cw = Math.max(480, size.width());
+                double ch = Math.max(340, size.height());
+                canvasPane.setPrefSize(cw, ch);
+            } else {
+                canvasPane.setPrefSize(2000, 1400);
+            }
+            renderCanvasItems(canvasPane, layoutName, false, null, null, null, null, null);
+            layoutNameLabel.setText("「" + layoutName + "」");
+        } finally {
+            canvasSelection.clear();
+            canvasSelection.addAll(backup);
+        }
+        Platform.runLater(this::fitHomeCanvasPreview);
     }
 
     int parsePickCount(String text, int max) {
@@ -4378,19 +4553,33 @@ public final class GazoApp extends Application {
         }
     }
 
-    void installCanvasResizeHandle(Pane canvas, Runnable onResizeFinished) {
-        Region handle = new Region();
-        handle.setPrefSize(16, 16);
-        handle.setStyle("-fx-background-color: rgba(80,80,80,0.65); -fx-background-radius: 2;");
-        handle.setCursor(Cursor.SE_RESIZE);
-        handle.setManaged(false);
+    /**
+     * キャンバス編集の「取っ手」を、キャンバス内容の外側（スクロール枠の右下）に置く。
+     * 取っ手をキャンバス Pane 上に置くと、大きいキャンバスでは画面外にあり、縮小表示では極小になるため見失いやすい。
+     */
+    /** キャンバス編集でドラッグ／数値指定の両方に使う下限（論理ピクセル）。 */
+    static final double CANVAS_EDIT_MIN_WIDTH = 600.0;
+    static final double CANVAS_EDIT_MIN_HEIGHT = 450.0;
 
-        Runnable relocateHandle = () -> {
-            double x = Math.max(0, canvas.getPrefWidth() - 20);
-            double y = Math.max(0, canvas.getPrefHeight() - 20);
-            handle.relocate(x, y);
-        };
-        relocateHandle.run();
+    void installCanvasResizeHandle(StackPane viewportOverlay, Pane canvas, Runnable onResizeFinished) {
+        Region handle = new Region();
+        handle.setPrefSize(48, 48);
+        handle.setMinSize(48, 48);
+        handle.setMaxSize(48, 48);
+        handle.setStyle(
+                "-fx-background-color: linear-gradient(135deg, #faf6ef 0%, #d8d0c4 45%, #a69f93 100%);"
+                        + "-fx-border-color: #5a5348; -fx-border-width: 2.5; -fx-background-radius: 6;");
+        handle.setCursor(Cursor.SE_RESIZE);
+        handle.setOpacity(0.98);
+        Tooltip.install(
+                handle,
+                new Tooltip(
+                        "ドラッグでキャンバスの幅・高さを変更。"
+                                + " Shift を押しながらドラッグで素早く広げられます。"
+                                + " 数値指定はツールバーの「キャンバスサイズ…」でも行えます。"));
+
+        StackPane.setAlignment(handle, Pos.BOTTOM_RIGHT);
+        StackPane.setMargin(handle, new Insets(0, 6, 6, 0));
 
         final double[] drag = new double[4]; // startX, startY, startW, startH
         handle.setOnMousePressed(event -> {
@@ -4403,10 +4592,10 @@ public final class GazoApp extends Application {
         handle.setOnMouseDragged(event -> {
             double dx = event.getScreenX() - drag[0];
             double dy = event.getScreenY() - drag[1];
-            double nextW = Math.max(900, drag[2] + dx);
-            double nextH = Math.max(700, drag[3] + dy);
+            double mult = event.isShiftDown() ? 2.0 : 1.0;
+            double nextW = Math.max(CANVAS_EDIT_MIN_WIDTH, drag[2] + dx * mult);
+            double nextH = Math.max(CANVAS_EDIT_MIN_HEIGHT, drag[3] + dy * mult);
             canvas.setPrefSize(nextW, nextH);
-            relocateHandle.run();
             event.consume();
         });
         handle.setOnMouseReleased(event -> {
@@ -4414,8 +4603,7 @@ public final class GazoApp extends Application {
             event.consume();
         });
 
-        canvas.getChildren().add(handle);
-        handle.toFront();
+        viewportOverlay.getChildren().add(handle);
     }
 
     /**
@@ -4496,31 +4684,161 @@ public final class GazoApp extends Application {
             }
             Collections.shuffle(order, new Random());
             String layoutName = order.get(0);
-            List<Path> backup = new ArrayList<>(canvasSelection);
-            try {
-                canvasSelection.clear();
-                canvasSelection.addAll(vault.listCanvasSelectionOrder(layoutName));
-                var size = vault.getCanvasSize(layoutName);
-                if (size != null) {
-                    double cw = Math.max(480, size.width());
-                    double ch = Math.max(340, size.height());
-                    canvasPane.setPrefSize(cw, ch);
-                } else {
-                    canvasPane.setPrefSize(2000, 1400);
-                }
-                renderCanvasItems(canvasPane, layoutName, false, null, null, null);
-                layoutNameLabel.setText("「" + layoutName + "」");
-            } finally {
-                canvasSelection.clear();
-                canvasSelection.addAll(backup);
-            }
-            Platform.runLater(this::fitHomeCanvasPreview);
+            renderHomeCanvasPreviewForLayout(canvasPane, layoutNameLabel, layoutName);
         } catch (IOException e) {
             GazoFx.showError("キャンバス表示", e.getMessage());
         }
     }
 
-    void renderCanvasItems(Pane canvas, String layoutName, boolean interactive, Path selectedPath, java.util.function.Consumer<Path> onSelect, java.util.function.Consumer<Path> onRemove) {
+    void renderCanvasItems(
+            Pane canvas,
+            String layoutName,
+            boolean interactive,
+            Path selectedPath,
+            Consumer<Path> onSelect,
+            Consumer<Path> onRemove) {
+        renderCanvasItems(canvas, layoutName, interactive, selectedPath, onSelect, onRemove, null, null);
+    }
+
+    /**
+     * 右クリックメニュー用。CustomMenuItem + Slider は hideOnClick(false) で操作時に閉じない。
+     */
+    private VBox buildCanvasContextMenuScaleSlider(
+            VBox item, Path path, String layoutName, Consumer<Path> onTransformPersisted) {
+        VBox box = new VBox(4);
+        box.setPadding(new Insets(2, 10, 6, 10));
+        Label headline = new Label("拡大（0.5〜2.4）");
+        headline.setStyle("-fx-font-size: 11px; -fx-text-fill: #555;");
+        Slider slider = new Slider(0.5, 2.4, 1);
+        slider.setMinWidth(120);
+        slider.setPrefWidth(200);
+        slider.setMaxWidth(Double.MAX_VALUE);
+        slider.setShowTickLabels(false);
+        slider.setShowTickMarks(false);
+        double gs = (Double) item.getProperties().getOrDefault("gazoScale", 1.0);
+        double initial = Math.max(0.5, Math.min(2.4, gs));
+        slider.setValue(initial);
+        Spinner<Double> valueSpinner = new Spinner<>();
+        valueSpinner.setValueFactory(new SpinnerValueFactory.DoubleSpinnerValueFactory(0.5, 2.4, initial, 0.05));
+        valueSpinner.setEditable(true);
+        valueSpinner.setPrefWidth(88);
+        valueSpinner.setMinWidth(72);
+        final boolean[] linkIgnore = {false};
+        Runnable applyScale = () -> {
+            double logical = Math.max(0.5, Math.min(2.4, slider.getValue()));
+            applyCanvasImageLogicalScale(path, layoutName, logical);
+            Double ratioObj = (Double) item.getProperties().getOrDefault("gazoCanvasScaleRatio", 1.0);
+            double vis = Math.max(0.2, Math.min(4.0, logical * ratioObj));
+            item.setScaleX(vis);
+            item.setScaleY(vis);
+            item.getProperties().put("gazoScale", logical);
+            if (onTransformPersisted != null) {
+                onTransformPersisted.accept(path);
+            }
+            flashCanvasTransformOverlay(item);
+        };
+        slider.valueProperty().addListener((o, ov, nv) -> {
+            double logical = Math.max(0.5, Math.min(2.4, nv.doubleValue()));
+            applyScale.run();
+            if (!linkIgnore[0]) {
+                linkIgnore[0] = true;
+                try {
+                    valueSpinner.getValueFactory().setValue(logical);
+                } finally {
+                    linkIgnore[0] = false;
+                }
+            }
+        });
+        valueSpinner.valueProperty().addListener((o, ov, nv) -> {
+            if (nv == null || linkIgnore[0]) {
+                return;
+            }
+            double v = Math.max(0.5, Math.min(2.4, nv.doubleValue()));
+            linkIgnore[0] = true;
+            try {
+                slider.setValue(v);
+            } finally {
+                linkIgnore[0] = false;
+            }
+        });
+        HBox row = new HBox(8, slider, valueSpinner);
+        row.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(slider, Priority.ALWAYS);
+        box.getChildren().addAll(headline, row);
+        return box;
+    }
+
+    private VBox buildCanvasContextMenuRotationSlider(
+            VBox item, Path path, String layoutName, Consumer<Path> onTransformPersisted) {
+        VBox box = new VBox(4);
+        box.setPadding(new Insets(2, 10, 6, 10));
+        Label headline = new Label("回転（−180〜180°）");
+        headline.setStyle("-fx-font-size: 11px; -fx-text-fill: #555;");
+        Slider slider = new Slider(-180, 180, 0);
+        slider.setMinWidth(120);
+        slider.setPrefWidth(200);
+        slider.setMaxWidth(Double.MAX_VALUE);
+        slider.setShowTickLabels(false);
+        slider.setShowTickMarks(false);
+        Double rotStored = (Double) item.getProperties().getOrDefault("gazoRotation", item.getRotate());
+        double disp = normalizeRotationForSlider(rotStored);
+        disp = Math.max(-180, Math.min(180, disp));
+        slider.setValue(disp);
+        Spinner<Double> valueSpinner = new Spinner<>();
+        valueSpinner.setValueFactory(new SpinnerValueFactory.DoubleSpinnerValueFactory(-180.0, 180.0, disp, 1.0));
+        valueSpinner.setEditable(true);
+        valueSpinner.setPrefWidth(88);
+        valueSpinner.setMinWidth(72);
+        final boolean[] linkIgnore = {false};
+        Runnable applyRotation = () -> {
+            double deg = slider.getValue();
+            applyCanvasImageLogicalRotation(path, layoutName, deg);
+            item.setRotate(deg);
+            item.getProperties().put("gazoRotation", deg);
+            if (onTransformPersisted != null) {
+                onTransformPersisted.accept(path);
+            }
+            flashCanvasTransformOverlay(item);
+        };
+        slider.valueProperty().addListener((o, ov, nv) -> {
+            applyRotation.run();
+            if (!linkIgnore[0]) {
+                linkIgnore[0] = true;
+                try {
+                    valueSpinner.getValueFactory().setValue(slider.getValue());
+                } finally {
+                    linkIgnore[0] = false;
+                }
+            }
+        });
+        valueSpinner.valueProperty().addListener((o, ov, nv) -> {
+            if (nv == null || linkIgnore[0]) {
+                return;
+            }
+            double v = Math.max(-180, Math.min(180, nv.doubleValue()));
+            linkIgnore[0] = true;
+            try {
+                slider.setValue(v);
+            } finally {
+                linkIgnore[0] = false;
+            }
+        });
+        HBox row = new HBox(8, slider, valueSpinner);
+        row.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(slider, Priority.ALWAYS);
+        box.getChildren().addAll(headline, row);
+        return box;
+    }
+
+    void renderCanvasItems(
+            Pane canvas,
+            String layoutName,
+            boolean interactive,
+            Path selectedPath,
+            Consumer<Path> onSelect,
+            Consumer<Path> onRemove,
+            Consumer<Path> onTransformPersisted,
+            Consumer<Path> onBringToFront) {
         canvas.getChildren().removeIf(node -> node instanceof VBox);
         double canvasW = Math.max(1, canvas.getPrefWidth());
         double canvasH = Math.max(1, canvas.getPrefHeight());
@@ -4531,7 +4849,7 @@ public final class GazoApp extends Application {
         List<Path> pathsSnapshot = new ArrayList<>(canvasSelection);
         int index = 0;
         for (Path path : pathsSnapshot) {
-            VBox item = createCanvasItem(path, layoutName, interactive, sizeRatio, null, pathsSnapshot);
+            VBox item = createCanvasItem(path, layoutName, interactive, sizeRatio, null, pathsSnapshot, onTransformPersisted);
             if (item == null) {
                 continue;
             }
@@ -4555,11 +4873,26 @@ public final class GazoApp extends Application {
                         ev.consume();
                     }
                 });
-                if (onRemove != null) {
+                if (onRemove != null || onBringToFront != null || onTransformPersisted != null) {
                     ContextMenu menu = new ContextMenu();
-                    MenuItem removeItem = new MenuItem("キャンバスから除去");
-                    removeItem.setOnAction(e -> onRemove.accept(path));
-                    menu.getItems().add(removeItem);
+                    if (onTransformPersisted != null) {
+                        CustomMenuItem scaleItem =
+                                new CustomMenuItem(buildCanvasContextMenuScaleSlider(item, path, layoutName, onTransformPersisted), false);
+                        CustomMenuItem rotItem =
+                                new CustomMenuItem(buildCanvasContextMenuRotationSlider(item, path, layoutName, onTransformPersisted), false);
+                        menu.getItems().addAll(scaleItem, rotItem);
+                        menu.getItems().add(new SeparatorMenuItem());
+                    }
+                    if (onBringToFront != null) {
+                        MenuItem frontItem = new MenuItem("前面に表示");
+                        frontItem.setOnAction(e -> onBringToFront.accept(path));
+                        menu.getItems().add(frontItem);
+                    }
+                    if (onRemove != null) {
+                        MenuItem removeItem = new MenuItem("キャンバスから除去");
+                        removeItem.setOnAction(e -> onRemove.accept(path));
+                        menu.getItems().add(removeItem);
+                    }
                     item.setOnContextMenuRequested(ev -> {
                         menu.show(item, ev.getScreenX(), ev.getScreenY());
                         ev.consume();
@@ -4722,11 +5055,11 @@ public final class GazoApp extends Application {
     }
 
     private VBox createCanvasItem(Path path, String layoutName, boolean interactive, double canvasSizeRatio) {
-        return createCanvasItem(path, layoutName, interactive, canvasSizeRatio, null, null);
+        return createCanvasItem(path, layoutName, interactive, canvasSizeRatio, null, null, null);
     }
 
     private VBox createCanvasItem(Path path, String layoutName, boolean interactive, double canvasSizeRatio, String sizeCodeOverride) {
-        return createCanvasItem(path, layoutName, interactive, canvasSizeRatio, sizeCodeOverride, null);
+        return createCanvasItem(path, layoutName, interactive, canvasSizeRatio, sizeCodeOverride, null, null);
     }
 
     /**
@@ -4734,6 +5067,20 @@ public final class GazoApp extends Application {
      * @param viewerNavSource 非 null のときオリジナル表示の ←/→ の対象（ランダムピック時は当該ピックの一覧）。null のときはキャンバス選択一覧を使う。
      */
     private VBox createCanvasItem(Path path, String layoutName, boolean interactive, double canvasSizeRatio, String sizeCodeOverride, List<Path> viewerNavSource) {
+        return createCanvasItem(path, layoutName, interactive, canvasSizeRatio, sizeCodeOverride, viewerNavSource, null);
+    }
+
+    /**
+     * @param onTransformPersisted キャンバス編集でホイール等による変形を Vault に保存した直後に呼ぶ（UI 連動用）
+     */
+    private VBox createCanvasItem(
+            Path path,
+            String layoutName,
+            boolean interactive,
+            double canvasSizeRatio,
+            String sizeCodeOverride,
+            List<Path> viewerNavSource,
+            Consumer<Path> onTransformPersisted) {
         String size = "M";
         try {
             size = sizeCodeOverride != null ? sizeCodeOverride : vault.getDisplaySize(path);
@@ -4763,6 +5110,23 @@ public final class GazoApp extends Application {
                 e.consume();
             }
         });
+        Label transformOverlay = null;
+        Node imageArea = view;
+        if (interactive) {
+            transformOverlay = new Label();
+            transformOverlay.setVisible(false);
+            transformOverlay.setMouseTransparent(true);
+            transformOverlay.setMaxWidth(Double.MAX_VALUE);
+            transformOverlay.setAlignment(Pos.CENTER);
+            transformOverlay.setPadding(new Insets(5, 12, 5, 12));
+            transformOverlay.setStyle(
+                    "-fx-background-color: rgba(32,32,38,0.88); -fx-text-fill: #fafafa; "
+                            + "-fx-font-size: 16px; -fx-font-weight: bold; -fx-background-radius: 6;");
+            StackPane imageStack = new StackPane(view, transformOverlay);
+            StackPane.setAlignment(transformOverlay, Pos.TOP_CENTER);
+            StackPane.setMargin(transformOverlay, new Insets(6, 0, 0, 0));
+            imageArea = imageStack;
+        }
         Label label = new Label(path.getFileName().toString());
         // ファイル名が長くてもカード幅（白背景）は画像幅を超えないようにする。
         double labelW = Math.max(1.0, image.getWidth());
@@ -4776,7 +5140,7 @@ public final class GazoApp extends Application {
             label.setOpacity(0.0);
             label.setMouseTransparent(true);
         }
-        VBox box = new VBox(6, view, label);
+        VBox box = new VBox(6, imageArea, label);
         box.setPadding(new Insets(8));
         box.setStyle("-fx-background-color: white; -fx-border-color: #cfc8ba; -fx-border-radius: 2; -fx-background-radius: 2;");
         double baseRotation = -14 + (Math.abs(path.getFileName().toString().hashCode()) % 29);
@@ -4799,23 +5163,121 @@ public final class GazoApp extends Application {
         box.getProperties().put("gazoScale", logicalScale);
         box.getProperties().put("gazoCanvasScaleRatio", canvasSizeRatio);
         box.getProperties().put("gazoRotation", box.getRotate());
-        if (interactive) {
-            makeCanvasTransformable(box, path, layoutName);
+        if (interactive && transformOverlay != null) {
+            box.getProperties().put("gazoTransformOverlay", transformOverlay);
+            makeCanvasTransformable(box, path, layoutName, onTransformPersisted);
         }
         return box;
+    }
+
+    /**
+     * 重なり順の末尾＝手前。キャンバス編集の描画順と一致させる。
+     */
+    public void bringCanvasImageToFront(Path imagePath, String layoutName) {
+        if (imagePath == null || !canvasSelection.contains(imagePath)) {
+            return;
+        }
+        canvasSelection.remove(imagePath);
+        canvasSelection.add(imagePath);
+        try {
+            vault.saveCanvasSelectionOrder(layoutName, new ArrayList<>(canvasSelection));
+        } catch (IOException e) {
+            GazoFx.showWarn("キャンバス順序保存エラー", e.getMessage());
+        }
+    }
+
+    /**
+     * キャンバス編集で選択中画像の論理スケール（0.5〜2.4、ホイール操作と同じ）を設定する。回転は維持する。
+     */
+    public void applyCanvasImageLogicalScale(Path imagePath, String layoutName, double logicalScale) {
+        if (imagePath == null) {
+            return;
+        }
+        try {
+            logicalScale = Math.max(0.5, Math.min(2.4, logicalScale));
+            double rotation = -14 + (Math.abs(imagePath.getFileName().toString().hashCode()) % 29);
+            var tf = vault.getCanvasTransform(layoutName, imagePath);
+            if (tf != null) {
+                rotation = tf.rotation();
+            }
+            vault.setCanvasTransform(layoutName, imagePath, logicalScale, rotation);
+        } catch (IOException e) {
+            GazoFx.showWarn("キャンバス変形保存エラー", e.getMessage());
+        }
+    }
+
+    /**
+     * キャンバス編集で選択中画像の回転（度）を設定する。拡大率は維持する。
+     */
+    public void applyCanvasImageLogicalRotation(Path imagePath, String layoutName, double rotationDegrees) {
+        if (imagePath == null) {
+            return;
+        }
+        try {
+            double scale = 1.0;
+            var tf = vault.getCanvasTransform(layoutName, imagePath);
+            if (tf != null) {
+                scale = tf.scale();
+            }
+            scale = Math.max(0.5, Math.min(2.4, scale));
+            vault.setCanvasTransform(layoutName, imagePath, scale, rotationDegrees);
+        } catch (IOException e) {
+            GazoFx.showWarn("キャンバス変形保存エラー", e.getMessage());
+        }
+    }
+
+    /** スライダー表示用に角度を -180〜180 度付近へ正規化する。 */
+    static double normalizeRotationForSlider(double degrees) {
+        if (Double.isNaN(degrees) || Double.isInfinite(degrees)) {
+            return 0.0;
+        }
+        double a = degrees % 360.0;
+        if (a > 180.0) {
+            a -= 360.0;
+        }
+        if (a < -180.0) {
+            a += 360.0;
+        }
+        return a;
+    }
+
+    private static final String GAZO_TRANSFORM_OVERLAY_HIDE = "gazoTransformOverlayHidePause";
+
+    /**
+     * 拡大・回転の操作中だけ、画像上に数値を重ねて表示し、操作が止まって少し経つと消す。
+     */
+    private void flashCanvasTransformOverlay(VBox card) {
+        Object o = card.getProperties().get("gazoTransformOverlay");
+        if (!(o instanceof Label overlay)) {
+            return;
+        }
+        Double scObj = (Double) card.getProperties().get("gazoScale");
+        Double rotObj = (Double) card.getProperties().get("gazoRotation");
+        double sc = scObj != null ? scObj : 1.0;
+        double rot = rotObj != null ? rotObj : card.getRotate();
+        overlay.setText(String.format("%.0f%%  ·  %.1f°", sc * 100.0, rot));
+        overlay.setVisible(true);
+        PauseTransition pause = (PauseTransition) card.getProperties().get(GAZO_TRANSFORM_OVERLAY_HIDE);
+        if (pause != null) {
+            pause.stop();
+        }
+        pause = new PauseTransition(Duration.millis(1100));
+        pause.setOnFinished(e -> overlay.setVisible(false));
+        card.getProperties().put(GAZO_TRANSFORM_OVERLAY_HIDE, pause);
+        pause.playFromStart();
     }
 
     private void makeDraggable(VBox node, Path imagePath, String layoutName, Pane canvas) {
         final double[] dragOffset = new double[2];
         node.setOnMousePressed(event -> {
-            dragOffset[0] = event.getSceneX() - node.getLayoutX();
-            dragOffset[1] = event.getSceneY() - node.getLayoutY();
+            Point2D local = canvas.sceneToLocal(event.getSceneX(), event.getSceneY());
+            dragOffset[0] = local.getX() - node.getLayoutX();
+            dragOffset[1] = local.getY() - node.getLayoutY();
             node.toFront();
         });
         node.setOnMouseDragged(event -> {
-            double nextX = event.getSceneX() - dragOffset[0];
-            double nextY = event.getSceneY() - dragOffset[1];
-            node.relocate(nextX, nextY);
+            Point2D local = canvas.sceneToLocal(event.getSceneX(), event.getSceneY());
+            node.relocate(local.getX() - dragOffset[0], local.getY() - dragOffset[1]);
         });
         node.setOnMouseReleased(event -> {
             try {
@@ -4828,7 +5290,40 @@ public final class GazoApp extends Application {
         });
     }
 
-    private void makeCanvasTransformable(VBox node, Path imagePath, String layoutName) {
+    private void makeCanvasTransformable(VBox node, Path imagePath, String layoutName, Consumer<Path> onTransformPersisted) {
+        Runnable persistTransform = () -> {
+            try {
+                vault.setCanvasTransform(layoutName, imagePath, (Double) node.getProperties().get("gazoScale"),
+                        (Double) node.getProperties().get("gazoRotation"));
+            } catch (IOException e) {
+                GazoFx.showWarn("キャンバス変形保存エラー", e.getMessage());
+            }
+            if (onTransformPersisted != null) {
+                Platform.runLater(() -> onTransformPersisted.accept(imagePath));
+            }
+        };
+
+        // トラックパッドのピンチは OS によって ScrollEvent ではなく ZoomEvent だけが届くことがある。
+        node.setOnZoom((ZoomEvent event) -> {
+            if (event.isShiftDown()) {
+                return;
+            }
+            double factor = event.getZoomFactor();
+            if (factor <= 0 || Double.isNaN(factor) || Math.abs(factor - 1.0) < 1e-9) {
+                return;
+            }
+            Double scaleObj = (Double) node.getProperties().getOrDefault("gazoScale", 1.0);
+            Double ratioObj = (Double) node.getProperties().getOrDefault("gazoCanvasScaleRatio", 1.0);
+            double scale = Math.max(0.5, Math.min(2.4, scaleObj * factor));
+            double visibleScale = Math.max(0.2, Math.min(4.0, scale * ratioObj));
+            node.setScaleX(visibleScale);
+            node.setScaleY(visibleScale);
+            node.getProperties().put("gazoScale", scale);
+            persistTransform.run();
+            flashCanvasTransformOverlay(node);
+            event.consume();
+        });
+
         node.setOnScroll(event -> {
             Double scaleObj = (Double) node.getProperties().getOrDefault("gazoScale", 1.0);
             Double ratioObj = (Double) node.getProperties().getOrDefault("gazoCanvasScaleRatio", 1.0);
@@ -4837,6 +5332,9 @@ public final class GazoApp extends Application {
             double sizeRatio = ratioObj;
             double rotation = rotationObj;
             double direction = scrollDirection(event);
+            if (Math.abs(direction) < 1e-9) {
+                return;
+            }
 
             if (event.isShiftDown()) {
                 rotation += direction * 2.0;
@@ -4850,38 +5348,38 @@ public final class GazoApp extends Application {
                 node.setScaleY(visibleScale);
                 node.getProperties().put("gazoScale", scale);
             }
-            try {
-                vault.setCanvasTransform(layoutName, imagePath, (Double) node.getProperties().get("gazoScale"), (Double) node.getProperties().get("gazoRotation"));
-            } catch (IOException e) {
-                GazoFx.showWarn("キャンバス変形保存エラー", e.getMessage());
-            }
+            persistTransform.run();
+            flashCanvasTransformOverlay(node);
             event.consume();
         });
     }
 
-    private double scrollDirection(javafx.scene.input.ScrollEvent event) {
+    /**
+     * トラックパッドのピンチでは |deltaX| が |deltaY| より大きく出ることがあり、横優先だと縮小方向が逆転して縮められない。
+     * 縦スクロール（deltaY）を先に解釈する。
+     */
+    private double scrollDirection(ScrollEvent event) {
         double dy = event.getDeltaY();
         double dx = event.getDeltaX();
-        if (Math.abs(dx) > Math.abs(dy)) {
-            return Math.signum(dx);
-        }
         if (Math.abs(dy) > 0.0001) {
             return Math.signum(dy);
         }
-        // Fallback for devices reporting text deltas.
-        double tdy = event.getTextDeltaYUnits() == javafx.scene.input.ScrollEvent.VerticalTextScrollUnits.NONE
+        if (Math.abs(dx) > 0.0001) {
+            return Math.signum(dx);
+        }
+        double tdy = event.getTextDeltaYUnits() == ScrollEvent.VerticalTextScrollUnits.NONE
                 ? 0.0
                 : event.getTextDeltaY();
-        double tdx = event.getTextDeltaXUnits() == javafx.scene.input.ScrollEvent.HorizontalTextScrollUnits.NONE
+        double tdx = event.getTextDeltaXUnits() == ScrollEvent.HorizontalTextScrollUnits.NONE
                 ? 0.0
                 : event.getTextDeltaX();
-        if (Math.abs(tdx) > Math.abs(tdy)) {
-            return Math.signum(tdx);
-        }
         if (Math.abs(tdy) > 0.0001) {
             return Math.signum(tdy);
         }
-        return 1.0;
+        if (Math.abs(tdx) > 0.0001) {
+            return Math.signum(tdx);
+        }
+        return 0.0;
     }
 
     @Override
