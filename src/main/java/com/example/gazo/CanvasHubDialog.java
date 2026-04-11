@@ -19,9 +19,11 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContentDisplay;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SelectionMode;
@@ -322,6 +324,33 @@ public final class CanvasHubDialog {
     addImagesButton.setOnAction(e -> showAddImagesToCanvasDialog(app, hubStage, currentLayout, refreshEditor));
     canvasSizeButton.setOnAction(
             e -> showEditCanvasSizeDialog(hubStage, editCanvas, saveCanvasSize, updateEditCanvasFit, refreshEditor));
+
+    ContextMenu canvasBackgroundMenu = new ContextMenu();
+    MenuItem ctxAddImages = new MenuItem("画像を追加…");
+    ctxAddImages.setOnAction(e -> showAddImagesToCanvasDialog(app, hubStage, currentLayout, refreshEditor));
+    MenuItem ctxCanvasSize = new MenuItem("キャンバスサイズ…");
+    ctxCanvasSize.setOnAction(
+            e -> showEditCanvasSizeDialog(hubStage, editCanvas, saveCanvasSize, updateEditCanvasFit, refreshEditor));
+    canvasBackgroundMenu.getItems().addAll(ctxAddImages, ctxCanvasSize);
+    editCanvas.setOnContextMenuRequested(
+            ev -> {
+                Node hit = ev.getPickResult().getIntersectedNode();
+                if (hit == null) {
+                    return;
+                }
+                Node n = hit;
+                while (n != null && n != editCanvas) {
+                    if (n.getParent() == editCanvas && n instanceof VBox) {
+                        return;
+                    }
+                    n = n.getParent();
+                }
+                if (n != editCanvas) {
+                    return;
+                }
+                canvasBackgroundMenu.show(editCanvas, ev.getScreenX(), ev.getScreenY());
+                ev.consume();
+            });
 
     layoutChooser.valueProperty().addListener((obs, oldV, newV) -> {
         if (suppressLayoutChooser.get()) {

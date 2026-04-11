@@ -144,6 +144,11 @@ public final class GazoApp extends Application {
     private Stage primaryStage;
     /** 類似チェックダイアログを二重に開かないため。 */
     private Stage openDuplicateReportStage;
+    /**
+     * ギャラリーから「この画像／選択画像の重複・類似を検索」で開くときの注目パス。
+     * {@link #showDuplicateReport()} 冒頭で取り込み済みにする。
+     */
+    private Set<Path> pendingDuplicateFocusPaths;
     /** メインウィンドウに重ねる処理中オーバーレイ（サムネイル再作成など） */
     private StackPane appBusyPane;
     private Label appBusyMessageLabel;
@@ -241,6 +246,12 @@ public final class GazoApp extends Application {
     static final String TAG_FILTER_UNTAGGED = "__gazo_untagged__";
     final Set<Path> canvasSelection = new LinkedHashSet<>();
     final Set<Path> listCheckedSelection = new LinkedHashSet<>();
+    /** メニュー「操作」のタグ一括・削除。{@link #updateGalleryListSelectionDependentControls()} で無効化する。 */
+    private MenuItem menuGalleryTagBulkAdd;
+    private MenuItem menuGalleryTagBulkRemove;
+    private MenuItem menuGalleryDeleteCheckedImages;
+    /** 画像一覧ツールバーの「選択を削除」。{@link #updateGalleryListSelectionDependentControls()} で無効化する。 */
+    private Button galleryDeleteCheckedButton;
     /** 実ファイル削除を遅延させる予約セット。重複整理ダイアログ終了時・アプリ終了時にまとめて削除する。 */
     private final Set<Path> pendingDeletePaths = Collections.synchronizedSet(new LinkedHashSet<>());
     private String listViewSize = "中";
@@ -368,14 +379,19 @@ public final class GazoApp extends Application {
                 bulkRemoveMenu,
                 deleteCheckedImagesMenu,
                 new SeparatorMenuItem());
+        menuGalleryTagBulkAdd = bulkAddMenu;
+        menuGalleryTagBulkRemove = bulkRemoveMenu;
+        menuGalleryDeleteCheckedImages = deleteCheckedImagesMenu;
+        actionsMenu.setOnShowing(e -> updateGalleryListSelectionDependentControls());
         MenuBar menuBar = new MenuBar(fileMenu, actionsMenu);
         Button selectAll = new Button("全選択");
         selectAll.setOnAction(e -> selectAllVisibleImages());
         Button clearSelection = new Button("クリア");
         clearSelection.setOnAction(e -> clearListCheckedSelection());
-        Button deleteCheckedImagesButton = new Button("選択を削除");
-        deleteCheckedImagesButton.setTooltip(new Tooltip("チェックした画像を Vault から削除（元に戻せません）"));
-        deleteCheckedImagesButton.setOnAction(e -> deleteCheckedImagesFromVault(stage));
+        galleryDeleteCheckedButton = new Button("選択を削除");
+        galleryDeleteCheckedButton.setTooltip(new Tooltip("チェックした画像を Vault から削除（元に戻せません）"));
+        galleryDeleteCheckedButton.setOnAction(e -> deleteCheckedImagesFromVault(stage));
+        updateGalleryListSelectionDependentControls();
         Button canvasHub = new Button("選択画像でキャンバス作成");
         canvasHub.setOnAction(e -> showCanvasHubDialog(stage));
         Button randomCanvasHub = new Button("ランダムにキャンバスを作成");
@@ -483,7 +499,7 @@ public final class GazoApp extends Application {
                 10,
                 selectAll,
                 clearSelection,
-                deleteCheckedImagesButton,
+                galleryDeleteCheckedButton,
                 canvasHub,
                 randomCanvasHub,
                 new Label("タグ:"),
@@ -2230,11 +2246,44 @@ public final class GazoApp extends Application {
                 listCheckedSelection.remove(imagePath);
             }
             card.setStyle(snapCardBorderStyle(listCheckedSelection.contains(imagePath)));
+            updateGalleryListSelectionDependentControls();
         });
         double cardH = galleryEstimatedRowHeight();
         card.setMinHeight(cardH);
         card.setPrefHeight(cardH);
         card.setMaxHeight(cardH);
+
+        ContextMenu cardCtx = new ContextMenu();
+        MenuItem miEditTags = new MenuItem("タグを編集");
+        miEditTags.setOnAction(e -> editTags(imagePath));
+        MenuItem miBulkAdd = new MenuItem("タグ一括追加...");
+        miBulkAdd.setOnAction(e -> addTagsToCanvasSelection());
+        MenuItem miBulkRemove = new MenuItem("タグ一括削除...");
+        miBulkRemove.setOnAction(e -> removeTagsFromCanvasSelection());
+        MenuItem miDupThis = new MenuItem("この画像の重複/類似を検索");
+        miDupThis.setOnAction(e -> {
+            pendingDuplicateFocusPaths = Set.of(imagePath);
+            showDuplicateReport();
+        });
+        MenuItem miDupSelected = new MenuItem("選択画像の重複/類似を検索");
+        miDupSelected.setOnAction(e -> {
+            pendingDuplicateFocusPaths = new LinkedHashSet<>(listCheckedSelection);
+            showDuplicateReport();
+        });
+        cardCtx.getItems().addAll(
+                miEditTags,
+                miBulkAdd,
+                miBulkRemove,
+                new SeparatorMenuItem(),
+                miDupThis,
+                miDupSelected);
+        cardCtx.setOnShowing(e -> {
+            boolean none = listCheckedSelection.isEmpty();
+            miBulkAdd.setDisable(none);
+            miBulkRemove.setDisable(none);
+            miDupSelected.setDisable(none);
+        });
+        card.setOnContextMenuRequested(e -> cardCtx.show(card, e.getScreenX(), e.getScreenY()));
         return card;
     }
 
@@ -2594,10 +2643,28 @@ public final class GazoApp extends Application {
             listCheckedSelection.remove(p);
             canvasSelection.remove(p);
         }
+        updateGalleryListSelectionDependentControls();
         refreshTagFilterOptions();
         refreshGallery();
         if (!failed.isEmpty()) {
             GazoFx.showError("削除エラー", String.join("\n", failed));
+        }
+    }
+
+    /** 一覧のチェック件数に応じて、タグ一括・チェック削除のメニューとツールバーボタンを有効/無効にする。 */
+    private void updateGalleryListSelectionDependentControls() {
+        boolean empty = listCheckedSelection.isEmpty();
+        if (menuGalleryTagBulkAdd != null) {
+            menuGalleryTagBulkAdd.setDisable(empty);
+        }
+        if (menuGalleryTagBulkRemove != null) {
+            menuGalleryTagBulkRemove.setDisable(empty);
+        }
+        if (menuGalleryDeleteCheckedImages != null) {
+            menuGalleryDeleteCheckedImages.setDisable(empty);
+        }
+        if (galleryDeleteCheckedButton != null) {
+            galleryDeleteCheckedButton.setDisable(empty);
         }
     }
 
@@ -2620,6 +2687,7 @@ public final class GazoApp extends Application {
             listCheckedSelection.clear();
             listCheckedSelection.addAll(listFilteredImages());
             refreshGallerySelectionStyles();
+            updateGalleryListSelectionDependentControls();
         } catch (IOException e) {
             GazoFx.showError("全選択エラー", e.getMessage());
         }
@@ -2628,6 +2696,7 @@ public final class GazoApp extends Application {
     private void clearListCheckedSelection() {
         listCheckedSelection.clear();
         refreshGallerySelectionStyles();
+        updateGalleryListSelectionDependentControls();
     }
 
     private boolean isPendingDelete(Path path) {
@@ -2678,6 +2747,12 @@ public final class GazoApp extends Application {
             openDuplicateReportStage.requestFocus();
             return;
         }
+        final Set<Path> duplicateFocusForNextScan =
+                pendingDuplicateFocusPaths == null || pendingDuplicateFocusPaths.isEmpty()
+                        ? null
+                        : new LinkedHashSet<>(pendingDuplicateFocusPaths);
+        pendingDuplicateFocusPaths = null;
+
         try {
             if (vault != null) {
                 galleryCanvasLayoutsByFileName = new HashMap<>(vault.mapCanvasLayoutsByFileName());
@@ -2686,6 +2761,11 @@ public final class GazoApp extends Application {
             }
         } catch (IOException e) {
             galleryCanvasLayoutsByFileName = Map.of();
+        }
+
+        final AtomicReference<Set<Path>> duplicateNarrowFocusRef = new AtomicReference<>();
+        if (duplicateFocusForNextScan != null && !duplicateFocusForNextScan.isEmpty()) {
+            duplicateNarrowFocusRef.set(new LinkedHashSet<>(duplicateFocusForNextScan));
         }
 
         Stage dupStage = new Stage();
@@ -3069,12 +3149,62 @@ public final class GazoApp extends Application {
                         similarRef.set(similarFinal);
                         exactGroupsRef.set(exactFinal);
                         reportArea.setText(buildDuplicateReport(exactFinal, similarFinal, threshold, exactOnlyScan));
-                        candidateList.getItems().setAll(finalCandidates);
+                        // ギャラリーから開いたときの注目パスは、このダイアログを閉じるまで維持する（再チェックで getAndSet(null) すると全候補表示に戻ってしまう）。
+                        Set<Path> narrow = duplicateNarrowFocusRef.get();
+                        List<Path> displayCandidates = finalCandidates;
                         Path selected = null;
-                        if (!finalCandidates.isEmpty()) {
-                            // 候補はクラスタ代表を面積降順で並べているので先頭が最大面積の代表。
+                        if (narrow != null && !narrow.isEmpty()) {
+                            Map<Path, Set<Path>> graph = buildDuplicateSimilarityGraph(exactFinal, similarFinal);
+                            Set<Path> wantedReps = new LinkedHashSet<>();
+                            for (Path f : narrow) {
+                                Path r = duplicateClusterRepresentativeForPath(f, graph);
+                                if (r != null) {
+                                    wantedReps.add(r);
+                                }
+                            }
+                            if (wantedReps.isEmpty()) {
+                                displayCandidates = finalCandidates;
+                                if (!finalCandidates.isEmpty()) {
+                                    selected = finalCandidates.get(0);
+                                }
+                                GazoFx.showWarn(
+                                        "重複/類似",
+                                        "注目した画像は重複・類似クラスタに含まれませんでした。全候補を表示します。");
+                            } else {
+                                List<Path> narrowed = new ArrayList<>();
+                                for (Path c : finalCandidates) {
+                                    if (wantedReps.contains(c)) {
+                                        narrowed.add(c);
+                                    }
+                                }
+                                if (!narrowed.isEmpty()) {
+                                    displayCandidates = narrowed;
+                                    selected = narrowed.get(0);
+                                    for (Path f : narrow) {
+                                        Path r = duplicateClusterRepresentativeForPath(f, graph);
+                                        if (r != null && narrowed.contains(r)) {
+                                            selected = r;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    displayCandidates = finalCandidates;
+                                    if (!finalCandidates.isEmpty()) {
+                                        selected = finalCandidates.get(0);
+                                    }
+                                    GazoFx.showWarn(
+                                            "重複/類似",
+                                            "注目画像に対応する候補行が見つかりませんでした。全候補を表示します。");
+                                }
+                            }
+                        } else if (!finalCandidates.isEmpty()) {
                             selected = finalCandidates.get(0);
+                        }
+                        candidateList.getItems().setAll(displayCandidates);
+                        if (selected != null) {
                             candidateList.getSelectionModel().select(selected);
+                        } else {
+                            candidateList.getSelectionModel().clearSelection();
                         }
                         selectedRef.set(selected);
                         refreshDuplicateClusterUiRunnable.run();
@@ -3134,6 +3264,9 @@ public final class GazoApp extends Application {
             t.start();
         };
         refreshAsyncRef.set(refreshAsync);
+        if (duplicateFocusForNextScan != null && !duplicateFocusForNextScan.isEmpty()) {
+            Platform.runLater(refreshAsync);
+        }
 
         mergeDeleteExactButton.setOnAction(e -> {
             ToggleGroup tg = exactKeepToggleGroupRef.get();
