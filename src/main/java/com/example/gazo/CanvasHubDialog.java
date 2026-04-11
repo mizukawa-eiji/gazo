@@ -159,6 +159,9 @@ public final class CanvasHubDialog {
     AtomicReference<Path> selectedCanvasImage = new AtomicReference<>(null);
     BooleanProperty showFileNameInCanvas = new SimpleBooleanProperty(app.isShowFileNameOption());
     AtomicReference<Pane> randomCanvasRef = new AtomicReference<>(null);
+    /** ランダムピックタブで ←/→ 用（プール空のときは no-op） */
+    AtomicReference<Runnable> randomKeyPrev = new AtomicReference<>(() -> {});
+    AtomicReference<Runnable> randomKeyNext = new AtomicReference<>(() -> {});
 
     Tab editTab = new Tab("キャンバス編集");
     editTab.setClosable(false);
@@ -564,13 +567,16 @@ public final class CanvasHubDialog {
             renderCurrent.run();
         };
 
-        prevButton.setOnAction(e -> {
+        Runnable prevPick = () -> {
             if (index.get() > 0) {
                 index.decrementAndGet();
                 renderCurrent.run();
             }
-        });
+        };
+        prevButton.setOnAction(e -> prevPick.run());
         nextButton.setOnAction(e -> nextPick.run());
+        randomKeyPrev.set(prevPick);
+        randomKeyNext.set(nextPick);
         createLayoutButton.setOnAction(e -> {
             int i = index.get();
             if (i < 0 || i >= history.size()) {
@@ -879,6 +885,16 @@ public final class CanvasHubDialog {
         if (e.getCode() == KeyCode.ESCAPE) {
             hubStage.close();
             e.consume();
+            return;
+        }
+        if (tabPane.getSelectionModel().getSelectedItem() == randomTab) {
+            if (e.getCode() == KeyCode.LEFT) {
+                randomKeyPrev.get().run();
+                e.consume();
+            } else if (e.getCode() == KeyCode.RIGHT) {
+                randomKeyNext.get().run();
+                e.consume();
+            }
         }
     });
 
