@@ -5,14 +5,16 @@ Cryptomator 互換 Vault に画像を暗号化保存し、ギャラリー表示�
 ## 必要環境
 
 - **JDK 17** 以上（プロジェクトは 17 をターゲットにビルド）
-- **JavaFX**: Gradle の `run` や IDE からの実行ではプラグインが依存関係を解決します。**単体 JAR を別 OS で実行する**ときは、その OS 用にビルドした JAR を使うか、その環境で `./gradlew fatJar` してください（JavaFX のネイティブは OS ごとに異なります）。
+- **JavaFX**: Gradle の `run` や IDE からの実行ではプラグインが依存関係を解決します。**単体 JAR を別 OS で実行する**ときは、その OS 用にビルドした JAR を使うか、その環境で `gradle fatJar` してください（JavaFX のネイティブは OS ごとに異なります）。
+- **Gradle**: コマンド例は Gradle CLI（`gradle`）前提です。プロジェクトルートで実行してください。
 
 ## ビルド
 
 ```bash
-./gradlew build          # Windows: gradlew.bat build
-./gradlew fatJar         # 依存ライブラリ込みの JAR（build/libs/gazo-1.0-SNAPSHOT-all.jar）
-./gradlew jpackageWin    # Windows の app-image（build/jpackage/Gazo/）
+gradle build
+gradle test           # ユニットテスト
+gradle fatJar         # 依存ライブラリ込みの JAR（build/libs/gazo-1.0-SNAPSHOT-all.jar）
+gradle jpackageWin    # Windows の app-image（build/jpackage/Gazo/）
 ```
 
 `jpackageWin` は `packaging/windows/app-icon.ico` をアイコンとして使用します（Windows のタスクバー反映用）。
@@ -20,7 +22,7 @@ Cryptomator 互換 Vault に画像を暗号化保存し、ギャラリー表示�
 ## GUI の起動
 
 ```bash
-./gradlew run
+gradle run
 ```
 
 または fat JAR:
@@ -78,7 +80,7 @@ export GAZO_PASSPHRASE='...'
 java -jar build/libs/gazo-1.0-SNAPSHOT-all.jar import -r /path/to/photos
 
 # Gradle から引数だけ渡す
-./gradlew run --args="import -r C:\Pictures\album"
+gradle run --args="import -r C:\Pictures\album"
 ```
 
 ## ライセンス・依存

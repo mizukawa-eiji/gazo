@@ -21,6 +21,8 @@ dependencies {
     implementation('commons-io:commons-io:2.16.1')
     runtimeOnly('org.slf4j:slf4j-simple:2.0.9')
     testImplementation('org.junit.jupiter:junit-jupiter:5.10.3')
+    // Gradle 8+ でテスト実行時に Platform ランチャーが足りない場合があるため明示する
+    testRuntimeOnly('org.junit.platform:junit-platform-launcher:1.10.3')
 }
 
 javafx {

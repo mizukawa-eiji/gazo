@@ -231,8 +231,8 @@ public final class CanvasHubDialog {
             var size = app.vault.getCanvasSize(currentLayout.get());
             if (size != null) {
                 editCanvas.setPrefSize(
-                        Math.max(GazoApp.CANVAS_EDIT_MIN_WIDTH, size.width()),
-                        Math.max(GazoApp.CANVAS_EDIT_MIN_HEIGHT, size.height()));
+                        Math.max(CanvasEditor.CANVAS_EDIT_MIN_WIDTH, size.width()),
+                        Math.max(CanvasEditor.CANVAS_EDIT_MIN_HEIGHT, size.height()));
             } else {
                 editCanvas.setPrefSize(2000, 1400);
             }
@@ -905,8 +905,8 @@ public final class CanvasHubDialog {
             AtomicReference<Runnable> refreshEditor) {
         int curW = (int) Math.round(editCanvas.getPrefWidth());
         int curH = (int) Math.round(editCanvas.getPrefHeight());
-        int minW = (int) Math.round(GazoApp.CANVAS_EDIT_MIN_WIDTH);
-        int minH = (int) Math.round(GazoApp.CANVAS_EDIT_MIN_HEIGHT);
+        int minW = (int) Math.round(CanvasEditor.CANVAS_EDIT_MIN_WIDTH);
+        int minH = (int) Math.round(CanvasEditor.CANVAS_EDIT_MIN_HEIGHT);
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.initOwner(owner);
         dialog.setTitle("キャンバスサイズ");
@@ -978,7 +978,7 @@ public final class CanvasHubDialog {
 
         LinkedHashMap<String, CheckBox> tagChecks = new LinkedHashMap<>();
         CheckBox untaggedCb = new CheckBox("タグなし");
-        tagChecks.put(GazoApp.TAG_FILTER_UNTAGGED, untaggedCb);
+        tagChecks.put(TagFilter.UNTAGGED_SENTINEL, untaggedCb);
         for (String t : allTagNames) {
             tagChecks.put(t, new CheckBox(t));
         }
