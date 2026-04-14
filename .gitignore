@@ -1,0 +1,16 @@
+target/
+*.class
+*.jar
+*.war
+*.ear
+.idea/
+*.iml
+.settings/
+.classpath
+.project
+.factorypath
+.vscode/
+*.swp
+*~
+.DS_Store
+dependency-reduced-pom.xml
