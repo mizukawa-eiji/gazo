@@ -1,5 +1,8 @@
 package com.example.gazo.vault;
 
+import com.example.gazo.GazoFx;
+import com.example.gazo.VaultConnection;
+
 import javax.imageio.ImageIO;
 import java.awt.Color;
 import java.awt.Graphics2D;
@@ -54,13 +57,26 @@ public final class GazoVaultService implements AutoCloseable {
     public record CanvasSize(double width, double height) {}
     public record CanvasTransform(double scale, double rotation) {}
 
+    private final VaultStorage storage;
     private final Path vaultPath;
+    private final String vaultDisplayLocation;
     private final SecureRandom secureRandom = new SecureRandom();
     private final MasterkeyFileAccess masterkeyFileAccess;
     private CryptoFileSystem cryptoFileSystem;
+    private boolean storagePrepared;
 
     public GazoVaultService(Path vaultPath) {
-        this.vaultPath = Objects.requireNonNull(vaultPath);
+        this(new LocalFsVaultStorage(vaultPath));
+    }
+
+    public GazoVaultService(VaultConnection connection, char[] webDavPassword) {
+        this(VaultStorageFactory.create(connection, webDavPassword));
+    }
+
+    public GazoVaultService(VaultStorage storage) {
+        this.storage = Objects.requireNonNull(storage, "storage");
+        this.vaultPath = storage.localVaultPath();
+        this.vaultDisplayLocation = storage.displayLocation();
         this.masterkeyFileAccess = new MasterkeyFileAccess(new byte[0], secureRandom);
     }
 
@@ -68,8 +84,21 @@ public final class GazoVaultService implements AutoCloseable {
         return vaultPath;
     }
 
+    public String getVaultDisplayLocation() {
+        return vaultDisplayLocation;
+    }
+
+    public boolean isRemoteVault() {
+        return storage.isRemote();
+    }
+
     public boolean vaultExists() {
-        return Files.isDirectory(vaultPath) && Files.exists(vaultPath.resolve("vault.cryptomator"));
+        try {
+            prepareStorageIfNeeded();
+            return Files.isDirectory(vaultPath) && Files.exists(vaultPath.resolve("vault.cryptomator"));
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     private CryptoFileSystemProperties propertiesFor(CharSequence passphrase) {
@@ -83,6 +112,7 @@ public final class GazoVaultService implements AutoCloseable {
      * 新規 Vault を作成する（ディレクトリは空でなくてもよいが、既存の Cryptomator Vault がある場合は失敗する）。
      */
     public void createVault(CharSequence passphrase) throws IOException, MasterkeyLoadingFailedException {
+        prepareStorageIfNeeded();
         Files.createDirectories(vaultPath);
         try (Masterkey masterkey = Masterkey.generate(secureRandom)) {
             masterkeyFileAccess.persist(masterkey, vaultPath.resolve("masterkey.cryptomator"), passphrase);
@@ -93,6 +123,7 @@ public final class GazoVaultService implements AutoCloseable {
         Files.createDirectories(imagesDirectory());
         Files.createDirectories(videosDirectory());
         Files.createDirectories(thumbnailsDirectory());
+        flushStorageChanges();
     }
 
     private void ensureUnlocked() {
@@ -102,6 +133,7 @@ public final class GazoVaultService implements AutoCloseable {
     }
 
     public void unlock(CharSequence passphrase) throws IOException, MasterkeyLoadingFailedException {
+        prepareStorageIfNeeded();
         close();
         cryptoFileSystem = CryptoFileSystemProvider.newFileSystem(vaultPath, propertiesFor(passphrase));
         Path root = cryptoFileSystem.getRootDirectories().iterator().next();
@@ -143,6 +175,7 @@ public final class GazoVaultService implements AutoCloseable {
         } catch (Exception ignored) {
             // ignore
         }
+        flushStorageChanges();
         return dest;
     }
 
@@ -162,6 +195,7 @@ public final class GazoVaultService implements AutoCloseable {
         } catch (Exception ignored) {
             // ignore
         }
+        flushStorageChanges();
         return dest;
     }
 
@@ -198,6 +232,7 @@ public final class GazoVaultService implements AutoCloseable {
                 count++;
             }
         }
+        flushStorageChanges();
         return count;
     }
 
@@ -280,6 +315,7 @@ public final class GazoVaultService implements AutoCloseable {
         String name = sourceFile.getFileName().toString();
         Path dest = resolveUniqueVideoPath(name);
         Files.copy(sourceFile, dest);
+        flushStorageChanges();
         return dest;
     }
 
@@ -341,6 +377,7 @@ public final class GazoVaultService implements AutoCloseable {
         if (displayProps.remove(key) != null) {
             saveDisplayProperties(displayProps);
         }
+        flushStorageChanges();
     }
 
     public List<Path> listImages() throws IOException {
@@ -494,6 +531,7 @@ public final class GazoVaultService implements AutoCloseable {
             }
         }
         saveCanvasTransformProperties(transformProps);
+        flushStorageChanges();
     }
 
     public String sha256(Path path) throws IOException {
@@ -614,6 +652,7 @@ public final class GazoVaultService implements AutoCloseable {
             properties.setProperty(key, value);
         }
         saveTagProperties(properties);
+        flushStorageChanges();
     }
 
     public Set<String> listAllTags() throws IOException {
@@ -644,6 +683,7 @@ public final class GazoVaultService implements AutoCloseable {
             properties.setProperty(key, size.trim().toUpperCase());
         }
         saveDisplayProperties(properties);
+        flushStorageChanges();
     }
 
     public CanvasPosition getCanvasPosition(Path imagePath) throws IOException {
@@ -676,6 +716,7 @@ public final class GazoVaultService implements AutoCloseable {
         Properties properties = loadCanvasProperties();
         properties.setProperty(canvasKey(layoutName, key), x + "," + y);
         saveCanvasProperties(properties);
+        flushStorageChanges();
     }
 
     public CanvasTransform getCanvasTransform(String layoutName, Path imagePath) throws IOException {
@@ -700,6 +741,7 @@ public final class GazoVaultService implements AutoCloseable {
         Properties properties = loadCanvasTransformProperties();
         properties.setProperty(canvasKey(layoutName, fileName), scale + "," + rotation);
         saveCanvasTransformProperties(properties);
+        flushStorageChanges();
     }
 
     public CanvasSize getCanvasSize(String layoutName) throws IOException {
@@ -722,6 +764,7 @@ public final class GazoVaultService implements AutoCloseable {
         Properties properties = loadCanvasProperties();
         properties.setProperty(canvasSizeKey(layoutName), width + "," + height);
         saveCanvasProperties(properties);
+        flushStorageChanges();
     }
 
     /**
@@ -786,6 +829,7 @@ public final class GazoVaultService implements AutoCloseable {
             properties.remove(CANVAS_SELECTION_KEY);
         }
         saveCanvasProperties(properties);
+        flushStorageChanges();
     }
 
     public Set<String> listCanvasLayouts() throws IOException {
@@ -901,6 +945,7 @@ public final class GazoVaultService implements AutoCloseable {
             displayProps.remove(rem);
             saveDisplayProperties(displayProps);
         }
+        flushStorageChanges();
     }
 
     private static boolean csvContainsFilenameToken(String raw, String fileName) {
@@ -957,6 +1002,7 @@ public final class GazoVaultService implements AutoCloseable {
         properties.remove(canvasSizeKey(layoutName));
         properties.remove(canvasSelectionKey(layoutName));
         saveCanvasProperties(properties);
+        flushStorageChanges();
     }
 
     private String canvasKey(String layoutName, String fileName) {
@@ -1077,6 +1123,43 @@ public final class GazoVaultService implements AutoCloseable {
                 // best effort
             }
             cryptoFileSystem = null;
+        }
+        try {
+            storage.close();
+        } catch (IOException ignored) {
+            // best effort
+        }
+    }
+
+    private void prepareStorageIfNeeded() throws IOException {
+        if (!storagePrepared) {
+            storage.prepareForOpen();
+            storagePrepared = true;
+        }
+    }
+
+    private void flushStorageChanges() throws IOException {
+        if (storagePrepared) {
+            int attempts = 0;
+            while (true) {
+                try {
+                    storage.flushChanges();
+                    return;
+                } catch (WebDavSyncConflictException conflict) {
+                    if (!(storage instanceof WebDavVaultStorage webDavStorage)) {
+                        throw conflict;
+                    }
+                    WebDavConflictResolution resolution = GazoFx.showWebDavConflictDialog(conflict);
+                    if (resolution == null || resolution == WebDavConflictResolution.CANCEL) {
+                        throw conflict;
+                    }
+                    webDavStorage.resolveConflict(conflict, resolution);
+                    attempts++;
+                    if (attempts > 3) {
+                        throw new IOException("WebDAV 競合の解決を完了できませんでした。");
+                    }
+                }
+            }
         }
     }
 }

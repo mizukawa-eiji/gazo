@@ -69,6 +69,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -86,6 +87,7 @@ import java.util.function.Consumer;
  */
 public final class GazoApp extends Application {
     GazoVaultService vault;
+    private VaultConnection currentVaultConnection;
     private Stage primaryStage;
     /** 類似チェックダイアログを二重に開かないため。 */
     private Stage openDuplicateReportStage;
@@ -163,23 +165,80 @@ public final class GazoApp extends Application {
     @Override
     public void start(Stage stage) {
         vaultUnlock.prepareStageShellBeforeVaultUnlock(stage);
-        Path defaultVaultDir = VaultPathStore.loadInitialVaultPath();
+        VaultConnection initialConnection = VaultPathStore.loadInitialVaultConnection();
+        requestAndOpenInitialVault(stage, initialConnection);
+    }
+
+    private void requestAndOpenInitialVault(Stage stage, VaultConnection preferredConnection) {
+        VaultOpenRequest initialRequest = buildInitialOpenRequest(stage, preferredConnection);
+        if (initialRequest != null) {
+            openInitialVault(stage, initialRequest);
+            return;
+        }
+        // WebDAV パスワード入力のキャンセル時は終了せず、接続先選択へ戻す。
+        var selected = VaultConnectionDialogs.promptForOpenRequest(stage, preferredConnection);
+        if (selected.isPresent()) {
+            openInitialVault(stage, selected.get());
+        }
+    }
+
+    private VaultOpenRequest buildInitialOpenRequest(Stage stage, VaultConnection connection) {
+        if (connection.isWebDav()) {
+            Optional<char[]> stored = VaultPathStore.loadStoredWebDavPassword(connection);
+            if (stored.isPresent()) {
+                return VaultOpenRequest.webDav(
+                        connection, stored.get(), VaultOpenRequest.WebDavPasswordPersistence.UNCHANGED);
+            }
+            var pwdOpt = VaultConnectionDialogs.promptForWebDavPassword(stage, connection);
+            if (pwdOpt.isEmpty()) {
+                return null;
+            }
+            return VaultOpenRequest.webDav(
+                    connection, pwdOpt.get(), VaultOpenRequest.WebDavPasswordPersistence.UNCHANGED);
+        }
+        return VaultOpenRequest.local(connection);
+    }
+
+    private void openInitialVault(Stage stage, VaultOpenRequest initialRequest) {
+        VaultConnection conn = initialRequest.connection();
+        char[] pwdCopy = conn.isWebDav() ? initialRequest.webDavPassword() : null;
+        VaultOpenRequest.WebDavPasswordPersistence persistence = initialRequest.webDavPasswordPersistence();
         vaultUnlock.openVaultAsync(
                 stage,
-                defaultVaultDir,
+                initialRequest,
                 err -> {
                     if (err instanceof VaultUnlockCancelledException) {
+                        if (pwdCopy != null) {
+                            Arrays.fill(pwdCopy, '\0');
+                        }
                         Platform.exit();
                         return;
                     }
                     if (err != null) {
+                        if (pwdCopy != null) {
+                            Arrays.fill(pwdCopy, '\0');
+                        }
                         GazoFx.showError("Vault を開けませんでした", err.getMessage());
                         Platform.exit();
                         return;
                     }
+                    currentVaultConnection = conn;
+                    VaultPathStore.saveLastVaultConnection(conn, pwdCopy, persistence);
+                    if (pwdCopy != null) {
+                        Arrays.fill(pwdCopy, '\0');
+                    }
                     continueApplicationAfterVaultOpened(stage);
                 },
-                this::adoptUnlockedVault);
+                this::adoptUnlockedVault,
+                () -> {
+                    var switched = VaultConnectionDialogs.promptForOpenRequest(stage, initialRequest.connection());
+                    if (switched.isPresent()) {
+                        openInitialVault(stage, switched.get());
+                    } else {
+                        // 接続先切替をキャンセルした場合は、元の接続先の入力へ戻す。
+                        requestAndOpenInitialVault(stage, initialRequest.connection());
+                    }
+                });
     }
 
     private void adoptUnlockedVault(GazoVaultService newVault) throws Exception {
@@ -187,7 +246,6 @@ public final class GazoApp extends Application {
             vault.close();
         }
         vault = newVault;
-        VaultPathStore.saveLastVaultPath(vault.getVaultPath());
         reloadCanvasSelectionFromVault("default");
     }
 
@@ -314,6 +372,10 @@ public final class GazoApp extends Application {
                 new MainWindowVaultActions(
                         new MainWindowVaultActions.Host(
                                 () -> vault,
+                                () -> currentVaultConnection,
+                                conn -> {
+                                    currentVaultConnection = conn;
+                                },
                                 vaultUnlock,
                                 this::adoptUnlockedVault,
                                 this::updateVaultPathLabel,
@@ -336,6 +398,7 @@ public final class GazoApp extends Application {
                         galleryTagActions::removeTagsFromCanvasSelection,
                         () -> deleteCheckedImagesFromVault(stage),
                         () -> vaultActions.changeVaultPath(stage),
+                        GazoFx::showConflictThresholdSettingsDialog,
                         this::updateGalleryListSelectionDependentControls);
         menuGalleryTagBulkAdd = menus.menuGalleryTagBulkAdd();
         menuGalleryTagBulkRemove = menus.menuGalleryTagBulkRemove();
@@ -467,7 +530,13 @@ public final class GazoApp extends Application {
 
         Region statusBarSpacer = new Region();
         HBox.setHgrow(statusBarSpacer, Priority.ALWAYS);
-        HBox statusBar = new HBox(12, vaultPathLabel, statusBarSpacer, importStatusLabel);
+        Button switchConnectionButton = new Button("接続先切替…");
+        switchConnectionButton.setOnAction(e -> {
+            if (vaultActions != null && primaryStage != null) {
+                vaultActions.changeVaultPath(primaryStage);
+            }
+        });
+        HBox statusBar = new HBox(12, vaultPathLabel, switchConnectionButton, statusBarSpacer, importStatusLabel);
         statusBar.setAlignment(Pos.CENTER_LEFT);
         statusBar.setPadding(new Insets(6, 10, 6, 10));
         statusBar.setStyle("-fx-background-color: rgba(255,255,255,0.78); -fx-border-color: #d7d0c2; -fx-border-width: 1 0 0 0;");
@@ -568,7 +637,8 @@ public final class GazoApp extends Application {
 
     private void updateVaultPathLabel() {
         if (vaultPathLabel != null && vault != null) {
-            vaultPathLabel.setText("Vault: " + vault.getVaultPath());
+            String mode = vault.isRemoteVault() ? "WebDAV" : "Local";
+            vaultPathLabel.setText("Vault(" + mode + "): " + vault.getVaultDisplayLocation());
         }
     }
 

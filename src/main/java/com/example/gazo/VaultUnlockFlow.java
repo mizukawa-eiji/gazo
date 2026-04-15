@@ -22,12 +22,27 @@ import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 /**
  * 起動時・Vault 変更時の解錠 UI と非同期オープン。
  */
 public final class VaultUnlockFlow {
+
+    /** {@link #prepareStageShellBeforeVaultUnlock} で設定。進捗メッセージ用。 */
+    private Label shellHintLabel;
+
+    /** Vault 作成・解錠・WebDAV 同期はブロックするため JavaFX スレッドでは実行しない。 */
+    private static final ExecutorService VAULT_IO_EXECUTOR =
+            Executors.newSingleThreadExecutor(
+                    r -> {
+                        Thread t = new Thread(r, "gazo-vault-io");
+                        t.setDaemon(true);
+                        return t;
+                    });
 
     private static final String VAULT_FORM_LABEL_TEXT = "-fx-text-fill: #33312d;";
     private static final String VAULT_FORM_FIELD_STYLE = "-fx-text-fill: #33312d; -fx-prompt-text-fill: #6a6355;";
@@ -55,6 +70,7 @@ public final class VaultUnlockFlow {
         Label shellHint = new Label("Vault を準備しています…");
         shellHint.setStyle("-fx-text-fill: #5c564a; -fx-font-size: 14px;");
         topStrip.getChildren().add(shellHint);
+        shellHintLabel = shellHint;
         shell.setTop(topStrip);
 
         stage.setScene(new Scene(shell, 560, 400));
@@ -69,23 +85,59 @@ public final class VaultUnlockFlow {
      * 別スレッドではなくイベントスレッドから呼ぶ。解錠後に {@code adopt} で Vault をアプリへ取り込み、{@code done} で完了を通知する。
      */
     public void openVaultAsync(Stage stage, Path vaultDir, Consumer<Exception> done, VaultUnlockSuccess adopt) {
+        openVaultAsync(stage, VaultOpenRequest.local(VaultConnection.local(vaultDir)), done, adopt, null);
+    }
+
+    /**
+     * 接続情報を含む Vault オープン。
+     */
+    public void openVaultAsync(Stage stage, VaultOpenRequest request, Consumer<Exception> done, VaultUnlockSuccess adopt) {
+        openVaultAsync(stage, request, done, adopt, null);
+    }
+
+    /**
+     * 接続情報を含む Vault オープン（必要に応じて接続先切替を許可）。
+     */
+    public void openVaultAsync(
+            Stage stage,
+            VaultOpenRequest request,
+            Consumer<Exception> done,
+            VaultUnlockSuccess adopt,
+            Runnable onSwitchConnection) {
         try {
-            GazoVaultService newVault = new GazoVaultService(vaultDir);
+            GazoVaultService newVault = new GazoVaultService(request.connection(), request.webDavPassword());
             unlockOrCreateInline(
                     stage,
                     newVault,
+                    onSwitchConnection,
                     () -> {
                         try {
                             adopt.adoptUnlockedVault(newVault);
+                            request.clearSecrets();
                             done.accept(null);
                         } catch (Exception e) {
+                            request.clearSecrets();
                             done.accept(e);
                         }
                     },
-                    () -> done.accept(new VaultUnlockCancelledException()));
+                    () -> {
+                        request.clearSecrets();
+                        done.accept(new VaultUnlockCancelledException());
+                    });
         } catch (Exception e) {
+            request.clearSecrets();
             done.accept(e);
         }
+    }
+
+    private void showShellProgress(String uiMessage, String logLine) {
+        System.err.println("[Gazo] " + logLine);
+        Platform.runLater(
+                () -> {
+                    if (shellHintLabel != null) {
+                        shellHintLabel.setText(uiMessage);
+                    }
+                });
     }
 
     private void clearVaultPasswordMount(Stage stage) {
@@ -121,7 +173,11 @@ public final class VaultUnlockFlow {
     }
 
     private void showUnlockPasswordInline(
-            Stage stage, String inlineError, Consumer<char[]> onSubmit, Runnable onCancel) {
+            Stage stage,
+            String inlineError,
+            Consumer<char[]> onSubmit,
+            Runnable onCancel,
+            Runnable onSwitchConnection) {
         Label title = new Label("Vault のロックを解除");
         title.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; " + VAULT_FORM_LABEL_TEXT);
         Label msg = new Label("パスワードを入力してください。");
@@ -138,24 +194,47 @@ public final class VaultUnlockFlow {
         Button ok = new Button("OK");
         Button cancel = new Button("キャンセル");
         ok.setDefaultButton(true);
-        HBox row = new HBox(8, ok, cancel);
+        Button switchConnection = new Button("接続先切替…");
+        switchConnection.setVisible(onSwitchConnection != null);
+        switchConnection.setManaged(onSwitchConnection != null);
+        HBox row = new HBox(8, ok, cancel, switchConnection);
         row.setAlignment(Pos.CENTER_LEFT);
         VBox box = new VBox(10, title, msg, errLabel, passField, row);
         box.setPadding(new Insets(20));
         box.setMaxWidth(440);
         box.setStyle("-fx-background-color: #f5f2ea; -fx-background-radius: 8;");
-        ok.setOnAction(e -> onSubmit.accept(passField.getText().toCharArray()));
+        ok.setOnAction(
+                e -> {
+                    ok.setDisable(true);
+                    cancel.setDisable(true);
+                    switchConnection.setDisable(true);
+                    passField.setDisable(true);
+                    char[] pwd = passField.getText().toCharArray();
+                    passField.clear();
+                    onSubmit.accept(pwd);
+                });
         cancel.setOnAction(
                 e -> {
                     clearVaultPasswordMount(stage);
                     onCancel.run();
+                });
+        switchConnection.setOnAction(
+                e -> {
+                    clearVaultPasswordMount(stage);
+                    if (onSwitchConnection != null) {
+                        onSwitchConnection.run();
+                    }
                 });
         passField.setOnAction(e -> ok.fire());
         mountVaultPasswordForm(stage, box);
         Platform.runLater(passField::requestFocus);
     }
 
-    private void showCreateVaultPasswordInline(Stage stage, Consumer<char[]> onSuccess, Runnable onCancel) {
+    private void showCreateVaultPasswordInline(
+            Stage stage,
+            Consumer<char[]> onSuccess,
+            Runnable onCancel,
+            Runnable onSwitchConnection) {
         Label title = new Label("新しい Vault を作成");
         title.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; " + VAULT_FORM_LABEL_TEXT);
         Label msg = new Label("パスワードを設定してください。");
@@ -178,7 +257,10 @@ public final class VaultUnlockFlow {
         Button ok = new Button("OK");
         Button cancel = new Button("キャンセル");
         ok.setDefaultButton(true);
-        HBox row = new HBox(8, ok, cancel);
+        Button switchConnection = new Button("接続先切替…");
+        switchConnection.setVisible(onSwitchConnection != null);
+        switchConnection.setManaged(onSwitchConnection != null);
+        HBox row = new HBox(8, ok, cancel, switchConnection);
         row.setAlignment(Pos.CENTER_LEFT);
         VBox box = new VBox(10, title, msg, errLabel, lab1, p1, lab2, p2, row);
         box.setPadding(new Insets(20));
@@ -204,6 +286,11 @@ public final class VaultUnlockFlow {
                         return;
                     }
                     Arrays.fill(b, '\0');
+                    ok.setDisable(true);
+                    cancel.setDisable(true);
+                    switchConnection.setDisable(true);
+                    p1.setDisable(true);
+                    p2.setDisable(true);
                     clearVaultPasswordMount(stage);
                     onSuccess.accept(a);
                 });
@@ -212,64 +299,165 @@ public final class VaultUnlockFlow {
                     clearVaultPasswordMount(stage);
                     onCancel.run();
                 });
+        switchConnection.setOnAction(
+                e -> {
+                    clearVaultPasswordMount(stage);
+                    if (onSwitchConnection != null) {
+                        onSwitchConnection.run();
+                    }
+                });
         p2.setOnAction(e -> ok.fire());
         mountVaultPasswordForm(stage, box);
         Platform.runLater(p1::requestFocus);
     }
 
     private void unlockOrCreateInline(
-            Stage stage, GazoVaultService targetVault, Runnable onUnlocked, Runnable onCancelled) {
+            Stage stage,
+            GazoVaultService targetVault,
+            Runnable onSwitchConnection,
+            Runnable onUnlocked,
+            Runnable onCancelled) {
         if (!targetVault.vaultExists()) {
             showCreateVaultPasswordInline(
                     stage,
-                    pass -> {
-                        try {
-                            targetVault.createVault(new String(pass));
-                            Arrays.fill(pass, '\0');
-                            onUnlocked.run();
-                        } catch (IOException | MasterkeyLoadingFailedException e) {
-                            Arrays.fill(pass, '\0');
-                            GazoFx.showError("Vault を作成できませんでした", e.getMessage());
-                            onCancelled.run();
-                        }
-                    },
-                    onCancelled);
+                    pass -> runVaultCreateInBackground(stage, targetVault, pass, onUnlocked, onCancelled),
+                    onCancelled,
+                    onSwitchConnection);
             return;
         }
-        runUnlockLoop(stage, targetVault, null, onUnlocked, onCancelled);
+        runUnlockLoop(stage, targetVault, null, onSwitchConnection, onUnlocked, onCancelled);
+    }
+
+    private void runVaultCreateInBackground(
+            Stage stage,
+            GazoVaultService targetVault,
+            char[] pass,
+            Runnable onUnlocked,
+            Runnable onCancelled) {
+        char[] copy = Arrays.copyOf(pass, pass.length);
+        Arrays.fill(pass, '\0');
+        showShellProgress(
+                "Vault を作成しています…（WebDAV の場合は同期に時間がかかることがあります）",
+                "Vault 作成を開始しました（バックグラウンドで処理中）");
+        CompletableFuture.runAsync(
+                        () -> {
+                            try {
+                                targetVault.createVault(new String(copy));
+                            } catch (IOException | MasterkeyLoadingFailedException e) {
+                                throw new RuntimeException(e);
+                            } finally {
+                                Arrays.fill(copy, '\0');
+                            }
+                        },
+                        VAULT_IO_EXECUTOR)
+                .whenComplete(
+                        (unused, err) ->
+                                Platform.runLater(
+                                        () -> {
+                                            if (err == null) {
+                                                onUnlocked.run();
+                                            } else {
+                                                Throwable t = unwrap(err);
+                                                String msg =
+                                                        t.getMessage() == null || t.getMessage().isBlank()
+                                                                ? t.getClass().getSimpleName()
+                                                                : t.getMessage();
+                                                GazoFx.showError("Vault を作成できませんでした", msg);
+                                                onCancelled.run();
+                                            }
+                                        }));
+    }
+
+    private static Throwable unwrap(Throwable err) {
+        Throwable t = err;
+        for (int i = 0; i < 5 && t != null; i++) {
+            if (t.getCause() != null
+                    && (t instanceof java.util.concurrent.CompletionException
+                            || t instanceof RuntimeException)) {
+                t = t.getCause();
+            } else {
+                break;
+            }
+        }
+        return t;
     }
 
     private void runUnlockLoop(
             Stage stage,
             GazoVaultService targetVault,
             String inlineError,
+            Runnable onSwitchConnection,
             Runnable onUnlocked,
             Runnable onCancelled) {
         showUnlockPasswordInline(
                 stage,
                 inlineError,
-                pass -> {
-                    try {
-                        targetVault.unlock(new String(pass));
-                        Arrays.fill(pass, '\0');
-                        clearVaultPasswordMount(stage);
-                        onUnlocked.run();
-                    } catch (InvalidPassphraseException e) {
-                        Arrays.fill(pass, '\0');
-                        clearVaultPasswordMount(stage);
-                        runUnlockLoop(
-                                stage,
-                                targetVault,
-                                "パスワードが正しくありません。",
-                                onUnlocked,
-                                onCancelled);
-                    } catch (IOException | MasterkeyLoadingFailedException e) {
-                        Arrays.fill(pass, '\0');
-                        clearVaultPasswordMount(stage);
-                        GazoFx.showError("Vault を開けませんでした", e.getMessage());
-                        onCancelled.run();
-                    }
-                },
-                onCancelled);
+                pass -> runVaultUnlockInBackground(stage, targetVault, pass, onSwitchConnection, onUnlocked, onCancelled),
+                onCancelled,
+                onSwitchConnection);
+    }
+
+    private void runVaultUnlockInBackground(
+            Stage stage,
+            GazoVaultService targetVault,
+            char[] pass,
+            Runnable onSwitchConnection,
+            Runnable onUnlocked,
+            Runnable onCancelled) {
+        char[] copy = Arrays.copyOf(pass, pass.length);
+        Arrays.fill(pass, '\0');
+        showShellProgress("Vault を解錠しています…", "Vault 解錠を開始しました（バックグラウンドで処理中）");
+        CompletableFuture.runAsync(
+                        () -> {
+                            try {
+                                targetVault.unlock(new String(copy));
+                            } catch (InvalidPassphraseException e) {
+                                throw new RuntimeException(e);
+                            } catch (IOException | MasterkeyLoadingFailedException e) {
+                                throw new RuntimeException(e);
+                            } finally {
+                                Arrays.fill(copy, '\0');
+                            }
+                        },
+                        VAULT_IO_EXECUTOR)
+                .whenComplete(
+                        (unused, err) ->
+                                Platform.runLater(
+                                        () -> {
+                                            if (err == null) {
+                                                clearVaultPasswordMount(stage);
+                                                onUnlocked.run();
+                                                return;
+                                            }
+                                            Throwable t = unwrap(err);
+                                            if (t instanceof InvalidPassphraseException) {
+                                                clearVaultPasswordMount(stage);
+                                                runUnlockLoop(
+                                                        stage,
+                                                        targetVault,
+                                                        "パスワードが正しくありません。",
+                                                        onSwitchConnection,
+                                                        onUnlocked,
+                                                        onCancelled);
+                                                return;
+                                            }
+                                            if (t instanceof IOException || t instanceof MasterkeyLoadingFailedException) {
+                                                clearVaultPasswordMount(stage);
+                                                String msg =
+                                                        t.getMessage() == null || t.getMessage().isBlank()
+                                                                ? t.getClass().getSimpleName()
+                                                                : t.getMessage();
+                                                GazoFx.showError("Vault を開けませんでした", msg);
+                                                onCancelled.run();
+                                                return;
+                                            }
+                                            clearVaultPasswordMount(stage);
+                                            String msg =
+                                                    t.getMessage() == null || t.getMessage().isBlank()
+                                                            ? t.getClass().getSimpleName()
+                                                            : t.getMessage();
+                                            GazoFx.showError("Vault を開けませんでした", msg);
+                                            onCancelled.run();
+                                        }));
     }
 }

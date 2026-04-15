@@ -31,7 +31,26 @@ gradle run
 java -jar build/libs/gazo-1.0-SNAPSHOT-all.jar
 ```
 
-引数なしで起動するとウィンドウが開きます。メニュー「操作」から画像の追加・Vault 変更などができます。
+引数なしで起動するとウィンドウが開きます。メニュー「ファイル」から画像の追加・Vault 変更などができます。
+
+### GUI での Vault 接続先
+
+- 起動時は **前回接続先**（local / WebDAV）で自動接続します。
+- 起動直後の Vault パスワード入力画面にも `接続先切替…` ボタンがあり、ここから接続先を変更できます。
+- 接続先の切替は、画面下部の `接続先切替…` ボタン、または `ファイル -> Vault変更…` で行えます。
+- 切替ダイアログで、**ローカルフォルダ**または**WebDAV**を選べます。
+- WebDAV の場合は以下を入力します。
+  - WebDAV URL（例: `https://example.com/remote.php/dav/files/username`）
+  - Vault パス（例: `/gazo-vault`）
+  - WebDAV ユーザー名
+  - WebDAV パスワード（都度入力。設定ファイルへは保存しません）
+- WebDAV 接続時も画像/動画/タグ/削除/キャンバス操作を同じ UI で利用できます。
+- WebDAV 同期競合が起きた場合は、解決ダイアログが表示されます。
+  - ローカルを優先して上書き
+  - リモートを優先して取り込み
+  - 競合コピー（`(conflict yyyyMMdd-HHmmss)` 付き）として別名保存
+  - 画像競合では d値（dHash距離）のしきい値をダイアログ内で調整でき、次回以降も設定が保持されます
+- d値のしきい値はメニュー `ファイル -> 競合比較しきい値設定…` からいつでも変更できます。
 
 ## コマンドライン（画像の取り込み）
 
@@ -49,12 +68,22 @@ java -jar build/libs/gazo-1.0-SNAPSHOT-all.jar import [オプション] <パス>
 | `--vault <dir>` | Vault のディレクトリ。省略時は `~/.gazo/settings.properties` の `lastVaultPath`（未設定なら `~/.gazo/vault`）。 |
 | `-r` / `--recursive` | **ディレクトリ**を指定したとき、サブフォルダを再帰的にたどって画像を取り込む。 |
 | `--password <文字列>` | Vault のパスフレーズ（**履歴に残るため非推奨**）。 |
+| `--webdav-endpoint <url>` | WebDAV 接続 URL（例: `https://example.com/remote.php/dav/files/username`）。 |
+| `--webdav-base-path <path>` | WebDAV 内の Vault パス（例: `/gazo-vault`）。 |
+| `--webdav-username <name>` | WebDAV ユーザー名。 |
+| `--webdav-password <文字列>` | WebDAV パスワード（**履歴に残るため非推奨**）。 |
 | `--` | この後ろをすべてパスとして扱う（`-` で始まるパスを渡すときなど）。 |
 
 ### パスフレーズの渡し方（優先順）
 
 1. 環境変数 **`GAZO_PASSPHRASE`**
 2. **`--password`**
+3. **対話入力**（`System.console()` が使えるときのみ）
+
+### WebDAV パスワードの渡し方（優先順）
+
+1. 環境変数 **`GAZO_WEBDAV_PASSWORD`**
+2. **`--webdav-password`**
 3. **対話入力**（`System.console()` が使えるときのみ）
 
 ### パスの扱い
@@ -81,6 +110,15 @@ java -jar build/libs/gazo-1.0-SNAPSHOT-all.jar import -r /path/to/photos
 
 # Gradle から引数だけ渡す
 gradle run --args="import -r C:\Pictures\album"
+
+# WebDAV 上の Vault へ取り込み（Linux / macOS の例）
+export GAZO_PASSPHRASE='...'
+export GAZO_WEBDAV_PASSWORD='...'
+java -jar build/libs/gazo-1.0-SNAPSHOT-all.jar import \
+  --webdav-endpoint https://example.com/remote.php/dav/files/username \
+  --webdav-base-path /gazo-vault \
+  --webdav-username username \
+  -r /path/to/photos
 ```
 
 ## ライセンス・依存

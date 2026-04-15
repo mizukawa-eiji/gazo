@@ -4,11 +4,11 @@ import com.example.gazo.vault.GazoVaultService;
 import javafx.concurrent.Task;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
-import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -22,6 +22,8 @@ import java.util.function.Supplier;
 public final class MainWindowVaultActions {
     public record Host(
             Supplier<GazoVaultService> vault,
+            Supplier<VaultConnection> currentConnection,
+            Consumer<VaultConnection> setCurrentConnection,
             VaultUnlockFlow vaultUnlock,
             VaultUnlockSuccess adoptUnlockedVault,
             Runnable updateVaultPathLabel,
@@ -66,31 +68,41 @@ public final class MainWindowVaultActions {
     }
 
     public void changeVaultPath(Stage stage) {
-        DirectoryChooser chooser = new DirectoryChooser();
-        chooser.setTitle("Vault の保存フォルダを選択");
         GazoVaultService v = host.vault.get();
-        if (v != null) {
-            java.io.File current = v.getVaultPath().toFile();
-            java.io.File initial = current.isDirectory() ? current : current.getParentFile();
-            if (initial != null && initial.exists()) {
-                chooser.setInitialDirectory(initial);
-            }
+        VaultConnection currentConnection = host.currentConnection.get();
+        VaultConnection initialConnection = currentConnection;
+        if (initialConnection == null && v != null) {
+            initialConnection = VaultConnection.local(v.getVaultPath());
         }
-        java.io.File selected = chooser.showDialog(stage);
-        if (selected == null) {
+        java.util.Optional<VaultOpenRequest> selectedRequest = VaultConnectionDialogs.promptForOpenRequest(stage, initialConnection);
+        if (selectedRequest.isEmpty()) {
             return;
         }
+        VaultOpenRequest request = selectedRequest.get();
+        char[] pwdCopy = request.connection().isWebDav() ? request.webDavPassword() : null;
+        VaultOpenRequest.WebDavPasswordPersistence persistence = request.webDavPasswordPersistence();
         host.vaultUnlock.openVaultAsync(
                 stage,
-                selected.toPath(),
+                request,
                 err -> {
                     if (err instanceof VaultUnlockCancelledException) {
+                        if (pwdCopy != null) {
+                            Arrays.fill(pwdCopy, '\0');
+                        }
                         return;
                     }
                     if (err != null) {
+                        if (pwdCopy != null) {
+                            Arrays.fill(pwdCopy, '\0');
+                        }
                         GazoFx.showError("Vault 変更エラー", err.getMessage());
                         return;
                     }
+                    VaultPathStore.saveLastVaultConnection(request.connection(), pwdCopy, persistence);
+                    if (pwdCopy != null) {
+                        Arrays.fill(pwdCopy, '\0');
+                    }
+                    host.setCurrentConnection.accept(request.connection());
                     host.updateVaultPathLabel.run();
                     host.refreshAfterVaultChanged.run();
                 },

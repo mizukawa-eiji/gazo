@@ -1,6 +1,8 @@
 package com.example.gazo.cli;
 
 import com.example.gazo.ImportFolderTagging;
+import com.example.gazo.VaultConnection;
+import com.example.gazo.VaultPathStore;
 import com.example.gazo.vault.GazoVaultService;
 import org.cryptomator.cryptolib.api.MasterkeyLoadingFailedException;
 
@@ -11,9 +13,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Properties;
 import java.util.Set;
 import java.util.stream.Stream;
 
@@ -21,11 +23,6 @@ import java.util.stream.Stream;
  * コマンドラインから Vault に画像を取り込む。
  */
 public final class CliImport {
-
-    private static final String APP_DIR_NAME = ".gazo";
-    private static final String DEFAULT_VAULT_DIR_NAME = "vault";
-    private static final String CONFIG_FILE_NAME = "settings.properties";
-    private static final String CONFIG_KEY_LAST_VAULT_PATH = "lastVaultPath";
 
     private CliImport() {
     }
@@ -46,6 +43,10 @@ public final class CliImport {
         boolean recursive = false;
         Path vaultOpt = null;
         String passwordOpt = null;
+        String webDavEndpointOpt = null;
+        String webDavBasePathOpt = null;
+        String webDavUsernameOpt = null;
+        String webDavPasswordOpt = null;
         List<String> pathStrings = new ArrayList<>();
 
         for (int i = 1; i < args.length; i++) {
@@ -76,6 +77,38 @@ public final class CliImport {
                 passwordOpt = args[i];
                 continue;
             }
+            if ("--webdav-endpoint".equals(a)) {
+                if (++i >= args.length) {
+                    err("オプション --webdav-endpoint には値が必要です。");
+                    System.exit(1);
+                }
+                webDavEndpointOpt = args[i];
+                continue;
+            }
+            if ("--webdav-base-path".equals(a)) {
+                if (++i >= args.length) {
+                    err("オプション --webdav-base-path には値が必要です。");
+                    System.exit(1);
+                }
+                webDavBasePathOpt = args[i];
+                continue;
+            }
+            if ("--webdav-username".equals(a)) {
+                if (++i >= args.length) {
+                    err("オプション --webdav-username には値が必要です。");
+                    System.exit(1);
+                }
+                webDavUsernameOpt = args[i];
+                continue;
+            }
+            if ("--webdav-password".equals(a)) {
+                if (++i >= args.length) {
+                    err("オプション --webdav-password には値が必要です。");
+                    System.exit(1);
+                }
+                webDavPasswordOpt = args[i];
+                continue;
+            }
             if (a.startsWith("-")) {
                 err("不明なオプション: " + a);
                 System.exit(1);
@@ -89,16 +122,43 @@ public final class CliImport {
             System.exit(1);
         }
 
-        Path vaultPath = vaultOpt != null ? vaultOpt : loadConfiguredVaultPath();
+        VaultConnection configuredConnection = VaultPathStore.loadInitialVaultConnection();
+        boolean webDavSpecified =
+                webDavEndpointOpt != null || webDavBasePathOpt != null || webDavUsernameOpt != null;
+        if (webDavSpecified && vaultOpt != null) {
+            err("--vault と --webdav-* オプションは同時に指定できません。");
+            System.exit(1);
+        }
+        VaultConnection connection;
+        if (webDavSpecified) {
+            if (webDavEndpointOpt == null || webDavBasePathOpt == null || webDavUsernameOpt == null) {
+                err("--webdav-endpoint / --webdav-base-path / --webdav-username をすべて指定してください。");
+                System.exit(1);
+            }
+            connection = VaultConnection.webDav(webDavEndpointOpt, webDavBasePathOpt, webDavUsernameOpt);
+        } else if (vaultOpt != null) {
+            connection = VaultConnection.local(vaultOpt);
+        } else {
+            connection = configuredConnection;
+        }
+
+        char[] webDavPassword = null;
+        if (connection.isWebDav()) {
+            webDavPassword = resolveWebDavPassword(webDavPasswordOpt);
+            if (webDavPassword == null || webDavPassword.length == 0) {
+                err("WebDAV パスワードを取得できませんでした（GAZO_WEBDAV_PASSWORD、--webdav-password、または対話入力）。");
+                System.exit(1);
+            }
+        }
         char[] passphrase = resolvePassphrase(passwordOpt);
         if (passphrase == null) {
             err("パスフレーズを取得できませんでした（GAZO_PASSPHRASE、--password、または対話入力）。");
             System.exit(1);
         }
 
-        GazoVaultService vault = new GazoVaultService(vaultPath);
+        GazoVaultService vault = new GazoVaultService(connection, webDavPassword);
         if (!vault.vaultExists()) {
-            err("Vault が見つかりません: " + vaultPath.toAbsolutePath());
+            err("Vault が見つかりません: " + connection.displayLabel());
             System.exit(2);
         }
 
@@ -108,7 +168,10 @@ public final class CliImport {
             err("Vault のロック解除に失敗しました（パスフレーズの誤りなど）: " + e.getMessage());
             System.exit(2);
         } finally {
-            java.util.Arrays.fill(passphrase, '\0');
+            Arrays.fill(passphrase, '\0');
+            if (webDavPassword != null) {
+                Arrays.fill(webDavPassword, '\0');
+            }
         }
 
         int failures = 0;
@@ -208,25 +271,6 @@ public final class CliImport {
                 || name.endsWith(".webp");
     }
 
-    private static Path loadConfiguredVaultPath() {
-        Path defaultPath = Paths.get(System.getProperty("user.home"), APP_DIR_NAME, DEFAULT_VAULT_DIR_NAME);
-        Path file = Paths.get(System.getProperty("user.home"), APP_DIR_NAME, CONFIG_FILE_NAME);
-        if (!Files.exists(file)) {
-            return defaultPath;
-        }
-        Properties properties = new Properties();
-        try (InputStream in = Files.newInputStream(file)) {
-            properties.load(in);
-            String raw = properties.getProperty(CONFIG_KEY_LAST_VAULT_PATH, "").trim();
-            if (raw.isEmpty()) {
-                return defaultPath;
-            }
-            return Paths.get(raw);
-        } catch (Exception e) {
-            return defaultPath;
-        }
-    }
-
     private static char[] resolvePassphrase(String passwordOpt) {
         if (passwordOpt != null && !passwordOpt.isEmpty()) {
             return passwordOpt.toCharArray();
@@ -242,6 +286,21 @@ public final class CliImport {
         return null;
     }
 
+    private static char[] resolveWebDavPassword(String passwordOpt) {
+        if (passwordOpt != null && !passwordOpt.isEmpty()) {
+            return passwordOpt.toCharArray();
+        }
+        String env = System.getenv("GAZO_WEBDAV_PASSWORD");
+        if (env != null && !env.isEmpty()) {
+            return env.toCharArray();
+        }
+        Console console = System.console();
+        if (console != null) {
+            return console.readPassword("WebDAV パスワード: ");
+        }
+        return null;
+    }
+
     private static void printHelp() {
         out("Gazo — コマンドライン");
         out("");
@@ -252,9 +311,14 @@ public final class CliImport {
         out("  --vault <dir>     Vault のディレクトリ（省略時は設定の最後に使ったパス、なければ ~/.gazo/vault）");
         out("  -r, --recursive   ディレクトリ指定時、サブフォルダも再帰的に取り込む");
         out("  --password <str>  パスフレーズ（非推奨。環境変数 GAZO_PASSPHRASE の利用を推奨）");
+        out("  --webdav-endpoint <url>   WebDAV 接続 URL（例: https://host/remote.php/dav/files/user）");
+        out("  --webdav-base-path <path> Vault を置く WebDAV 内パス（例: /gazo-vault）");
+        out("  --webdav-username <name>  WebDAV ユーザー名");
+        out("  --webdav-password <str>   WebDAV パスワード（非推奨。環境変数 GAZO_WEBDAV_PASSWORD 推奨）");
         out("  --                以降をすべてパスとして扱う");
         out("");
         out("パスフレーズ: 環境変数 GAZO_PASSPHRASE、--password、または対話入力の順で使用します。");
+        out("WebDAV パスワード: 環境変数 GAZO_WEBDAV_PASSWORD、--webdav-password、または対話入力の順で使用します。");
         out("");
         out("ディレクトリを -r なしで指定した場合、その直下の画像ファイルのみ取り込みます。");
     }
