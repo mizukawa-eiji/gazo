@@ -128,6 +128,7 @@ public final class GazoApp extends Application {
         return t;
     });
     private Label vaultPathLabel;
+    private Label syncStatusLabel;
     /** インポート中のみファイル名を表示（通常は空） */
     private Label importStatusLabel;
     /** 画像タブツールバー: フィルター後の表示数と Vault 内の画像総数 */
@@ -397,6 +398,7 @@ public final class GazoApp extends Application {
                         galleryTagActions::addTagsToCanvasSelection,
                         galleryTagActions::removeTagsFromCanvasSelection,
                         () -> deleteCheckedImagesFromVault(stage),
+                        () -> vaultActions.restoreRecentlyDeletedImages(stage),
                         () -> vaultActions.changeVaultPath(stage),
                         GazoFx::showConflictThresholdSettingsDialog,
                         this::updateGalleryListSelectionDependentControls);
@@ -420,6 +422,8 @@ public final class GazoApp extends Application {
         vaultPathLabel = new Label();
         vaultPathLabel.setMinWidth(0);
         vaultPathLabel.setTextOverrun(OverrunStyle.ELLIPSIS);
+        syncStatusLabel = new Label("");
+        syncStatusLabel.setStyle("-fx-text-fill: #4a5560;");
         importStatusLabel = new Label("");
         importStatusLabel.setMinWidth(0);
         importStatusLabel.setTextOverrun(OverrunStyle.ELLIPSIS);
@@ -536,7 +540,7 @@ public final class GazoApp extends Application {
                 vaultActions.changeVaultPath(primaryStage);
             }
         });
-        HBox statusBar = new HBox(12, vaultPathLabel, switchConnectionButton, statusBarSpacer, importStatusLabel);
+        HBox statusBar = new HBox(12, vaultPathLabel, syncStatusLabel, switchConnectionButton, statusBarSpacer, importStatusLabel);
         statusBar.setAlignment(Pos.CENTER_LEFT);
         statusBar.setPadding(new Insets(6, 10, 6, 10));
         statusBar.setStyle("-fx-background-color: rgba(255,255,255,0.78); -fx-border-color: #d7d0c2; -fx-border-width: 1 0 0 0;");
@@ -646,6 +650,9 @@ public final class GazoApp extends Application {
         if (vaultPathLabel != null && vault != null) {
             String mode = vault.isRemoteVault() ? "WebDAV" : "Local";
             vaultPathLabel.setText("アルバム(" + mode + "): " + vault.getVaultDisplayLocation());
+            if (syncStatusLabel != null) {
+                syncStatusLabel.setText(vault.syncStatusSummary());
+            }
         }
     }
 
@@ -672,6 +679,7 @@ public final class GazoApp extends Application {
     }
 
     void refreshGallery() {
+        updateVaultPathLabel();
         imageGallery.beginFullReload();
         try {
             galleryTagMap = vault.tagsByFileName();

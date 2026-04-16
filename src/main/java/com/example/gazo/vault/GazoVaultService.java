@@ -26,7 +26,9 @@ import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -44,6 +46,8 @@ import java.util.stream.Stream;
 public final class GazoVaultService implements AutoCloseable {
     public record SimilarPair(Path left, Path right, int distance) {}
     public record CopyProgress(int copiedFiles, int totalFiles, String currentRelativePath) {}
+    public record RecentlyDeletedImage(String fileName, Instant deletedAt) {}
+    public record RestoreDeletedImagesResult(int restoredCount, List<String> failedMessages) {}
 
     private static final URI DEFAULT_KEY_ID = URI.create(MasterkeyFileKeyLoader.SCHEME + ":masterkey.cryptomator");
     private static final String IMAGES_DIR = "images";
@@ -53,6 +57,10 @@ public final class GazoVaultService implements AutoCloseable {
     private static final String DISPLAY_FILE = ".gazo-display.properties";
     private static final String CANVAS_FILE = ".gazo-canvas.properties";
     private static final String CANVAS_TRANSFORM_FILE = ".gazo-canvas-transform.properties";
+    private static final String TRASH_DIR = ".gazo-trash";
+    private static final String TRASH_IMAGES_DIR = "images";
+    private static final String TRASH_THUMBS_DIR = "thumbnails";
+    private static final String TRASH_INDEX_FILE = "index.properties";
     private static final String DEFAULT_CANVAS_LAYOUT = "default";
     /** 旧形式（単一）のキャンバス選択キー。 */
     private static final String CANVAS_SELECTION_KEY = "__canvas_selection__";
@@ -93,6 +101,10 @@ public final class GazoVaultService implements AutoCloseable {
 
     public boolean isRemoteVault() {
         return storage.isRemote();
+    }
+
+    public String syncStatusSummary() {
+        return storage.syncStatusSummary();
     }
 
     public boolean vaultExists() {
@@ -594,17 +606,38 @@ public final class GazoVaultService implements AutoCloseable {
 
     public void deleteImage(Path imagePath) throws IOException {
         ensureUnlocked();
-        Files.deleteIfExists(imagePath);
-        try {
-            Files.deleteIfExists(thumbnailPathFor(imagePath));
-        } catch (Exception ignored) {
-            // ignore
+        Path imageDir = imagesDirectory().normalize();
+        if (!imagePath.normalize().startsWith(imageDir)) {
+            throw new IllegalArgumentException("not under images directory");
         }
         String key = imagePath.getFileName().toString();
+        if (!Files.exists(imagePath)) {
+            return;
+        }
+        Path thumbnailPath = thumbnailPathFor(imagePath);
         Properties tagProps = loadTagProperties();
+        Properties displayProps = loadDisplayProperties();
+        String deletedId = createTrashId();
+        String trashImageName = deletedId + "__" + key;
+        String trashThumbName = deletedId + "__" + key + ".jpg";
+        Files.createDirectories(trashImagesDir());
+        Files.move(imagePath, trashImagesDir().resolve(trashImageName), StandardCopyOption.REPLACE_EXISTING);
+        if (Files.exists(thumbnailPath)) {
+            Files.createDirectories(trashThumbnailsDir());
+            Files.move(thumbnailPath, trashThumbnailsDir().resolve(trashThumbName), StandardCopyOption.REPLACE_EXISTING);
+        } else {
+            trashThumbName = "";
+        }
+        upsertTrashIndexEntry(
+                deletedId,
+                key,
+                Instant.now(),
+                trashImageName,
+                trashThumbName,
+                tagProps.getProperty(key, ""),
+                displayProps.getProperty(key, ""));
         tagProps.remove(key);
         saveTagProperties(tagProps);
-        Properties displayProps = loadDisplayProperties();
         displayProps.remove(key);
         saveDisplayProperties(displayProps);
         purgeImageFromCanvasState(key);
@@ -617,6 +650,70 @@ public final class GazoVaultService implements AutoCloseable {
         }
         saveCanvasTransformProperties(transformProps);
         flushStorageChanges();
+    }
+
+    public List<RecentlyDeletedImage> listRecentlyDeletedImages(int limit) throws IOException {
+        ensureUnlocked();
+        List<TrashIndexEntry> entries = loadTrashIndexEntries();
+        entries.sort(Comparator.comparing(TrashIndexEntry::deletedAt).reversed());
+        if (limit > 0 && entries.size() > limit) {
+            entries = entries.subList(0, limit);
+        }
+        List<RecentlyDeletedImage> out = new ArrayList<>(entries.size());
+        for (TrashIndexEntry entry : entries) {
+            out.add(new RecentlyDeletedImage(entry.originalFileName(), entry.deletedAt()));
+        }
+        return out;
+    }
+
+    public RestoreDeletedImagesResult restoreRecentlyDeletedImages(int limit) throws IOException {
+        ensureUnlocked();
+        List<TrashIndexEntry> entries = loadTrashIndexEntries();
+        entries.sort(Comparator.comparing(TrashIndexEntry::deletedAt).reversed());
+        if (limit > 0 && entries.size() > limit) {
+            entries = entries.subList(0, limit);
+        }
+        if (entries.isEmpty()) {
+            return new RestoreDeletedImagesResult(0, List.of());
+        }
+        Properties trashIndex = loadTrashIndexProperties();
+        Properties tagProps = loadTagProperties();
+        Properties displayProps = loadDisplayProperties();
+        int restored = 0;
+        List<String> failures = new ArrayList<>();
+        for (TrashIndexEntry entry : entries) {
+            Path sourceImage = trashImagesDir().resolve(entry.trashImageName());
+            Path targetImage = imagesDirectory().resolve(entry.originalFileName());
+            if (Files.exists(targetImage)) {
+                failures.add(entry.originalFileName() + ": 同名ファイルが既に存在します");
+                continue;
+            }
+            if (!Files.exists(sourceImage)) {
+                failures.add(entry.originalFileName() + ": ごみ箱内の画像ファイルが見つかりません");
+                trashIndex.remove("entry." + entry.id());
+                continue;
+            }
+            Files.move(sourceImage, targetImage, StandardCopyOption.REPLACE_EXISTING);
+            if (entry.trashThumbName() != null && !entry.trashThumbName().isBlank()) {
+                Path sourceThumb = trashThumbnailsDir().resolve(entry.trashThumbName());
+                if (Files.exists(sourceThumb)) {
+                    Files.move(sourceThumb, thumbnailPathFor(targetImage), StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+            if (entry.tagRaw() != null && !entry.tagRaw().isBlank()) {
+                tagProps.setProperty(entry.originalFileName(), entry.tagRaw());
+            }
+            if (entry.displayRaw() != null && !entry.displayRaw().isBlank()) {
+                displayProps.setProperty(entry.originalFileName(), entry.displayRaw());
+            }
+            trashIndex.remove("entry." + entry.id());
+            restored++;
+        }
+        saveTrashIndexProperties(trashIndex);
+        saveTagProperties(tagProps);
+        saveDisplayProperties(displayProps);
+        flushStorageChanges();
+        return new RestoreDeletedImagesResult(restored, List.copyOf(failures));
     }
 
     public String sha256(Path path) throws IOException {
@@ -686,6 +783,120 @@ public final class GazoVaultService implements AutoCloseable {
 
     private Path canvasTransformFile() {
         return cleartextRoot().resolve(CANVAS_TRANSFORM_FILE);
+    }
+
+    private Path trashRoot() {
+        return cleartextRoot().resolve(TRASH_DIR);
+    }
+
+    private Path trashImagesDir() {
+        return trashRoot().resolve(TRASH_IMAGES_DIR);
+    }
+
+    private Path trashThumbnailsDir() {
+        return trashRoot().resolve(TRASH_THUMBS_DIR);
+    }
+
+    private Path trashIndexFile() {
+        return trashRoot().resolve(TRASH_INDEX_FILE);
+    }
+
+    private String createTrashId() {
+        return Long.toUnsignedString(System.currentTimeMillis(), 36)
+                + "-"
+                + Long.toUnsignedString(secureRandom.nextLong(), 36);
+    }
+
+    private void upsertTrashIndexEntry(
+            String id,
+            String originalFileName,
+            Instant deletedAt,
+            String trashImageName,
+            String trashThumbName,
+            String tagRaw,
+            String displayRaw)
+            throws IOException {
+        Properties properties = loadTrashIndexProperties();
+        String value =
+                encodeField(originalFileName)
+                        + "|"
+                        + deletedAt.toEpochMilli()
+                        + "|"
+                        + encodeField(trashImageName)
+                        + "|"
+                        + encodeField(trashThumbName == null ? "" : trashThumbName)
+                        + "|"
+                        + encodeField(tagRaw == null ? "" : tagRaw)
+                        + "|"
+                        + encodeField(displayRaw == null ? "" : displayRaw);
+        properties.setProperty("entry." + id, value);
+        saveTrashIndexProperties(properties);
+    }
+
+    private Properties loadTrashIndexProperties() throws IOException {
+        ensureUnlocked();
+        Properties properties = new Properties();
+        Path file = trashIndexFile();
+        if (!Files.exists(file)) {
+            return properties;
+        }
+        try (InputStream in = Files.newInputStream(file)) {
+            properties.load(in);
+        }
+        return properties;
+    }
+
+    private void saveTrashIndexProperties(Properties properties) throws IOException {
+        ensureUnlocked();
+        Files.createDirectories(trashRoot());
+        Path file = trashIndexFile();
+        try (OutputStream out = Files.newOutputStream(file)) {
+            properties.store(out, "gazo trash index");
+        }
+    }
+
+    private List<TrashIndexEntry> loadTrashIndexEntries() throws IOException {
+        Properties properties = loadTrashIndexProperties();
+        List<TrashIndexEntry> out = new ArrayList<>();
+        for (String key : properties.stringPropertyNames()) {
+            if (!key.startsWith("entry.")) {
+                continue;
+            }
+            String id = key.substring("entry.".length());
+            String[] parts = properties.getProperty(key, "").split("\\|", 6);
+            if (parts.length < 6) {
+                continue;
+            }
+            try {
+                String originalFileName = decodeField(parts[0]);
+                Instant deletedAt = Instant.ofEpochMilli(Long.parseLong(parts[1]));
+                String trashImageName = decodeField(parts[2]);
+                String trashThumbName = decodeField(parts[3]);
+                String tagRaw = decodeField(parts[4]);
+                String displayRaw = decodeField(parts[5]);
+                if (originalFileName.isBlank() || trashImageName.isBlank()) {
+                    continue;
+                }
+                out.add(
+                        new TrashIndexEntry(
+                                id, originalFileName, deletedAt, trashImageName, trashThumbName, tagRaw, displayRaw));
+            } catch (Exception ignored) {
+                // ignore broken entries
+            }
+        }
+        return out;
+    }
+
+    private static String encodeField(String value) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private static String decodeField(String encoded) {
+        if (encoded == null || encoded.isEmpty()) {
+            return "";
+        }
+        byte[] raw = Base64.getUrlDecoder().decode(encoded);
+        return new String(raw, java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private Properties loadTagProperties() throws IOException {
@@ -1167,6 +1378,15 @@ public final class GazoVaultService implements AutoCloseable {
             properties.store(out, "gazo canvas transform");
         }
     }
+
+    private record TrashIndexEntry(
+            String id,
+            String originalFileName,
+            Instant deletedAt,
+            String trashImageName,
+            String trashThumbName,
+            String tagRaw,
+            String displayRaw) {}
 
     private Set<String> parseTags(String raw) {
         Set<String> tags = new LinkedHashSet<>();

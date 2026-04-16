@@ -52,7 +52,9 @@ public final class GalleryCheckedImagesDelete {
         Alert confirm =
                 new Alert(
                         Alert.AlertType.CONFIRMATION,
-                        "アルバムから次の画像ファイルを完全に削除します。元に戻せません。\n\n" + preview,
+                        "アルバムから次の画像ファイルを削除します。\n"
+                                + "「最近削除した画像を復元…」から復元できます。\n\n"
+                                + preview,
                         ButtonType.OK,
                         ButtonType.CANCEL);
         confirm.setTitle("画像を削除");

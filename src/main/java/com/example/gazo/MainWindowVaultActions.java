@@ -11,6 +11,9 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.Arrays;
 import java.util.List;
@@ -25,6 +28,9 @@ import java.util.stream.Stream;
  * メニュー「ファイル」から呼ぶ Vault 操作（画像追加・Vault 変更・サムネ再作成）。
  */
 public final class MainWindowVaultActions {
+    private static final DateTimeFormatter MIGRATION_REPORT_STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+    private static final DateTimeFormatter DELETED_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
     private record MediaCounts(int images, int videos) {}
 
     private record CopyProgress(int copiedFiles, int totalFiles, String currentRelativePath) {}
@@ -102,15 +108,28 @@ public final class MainWindowVaultActions {
             return;
         }
         boolean copyAndMigrate = switchMode == VaultSwitchMode.COPY_AND_MIGRATE;
+        StringBuilder migrationReport = copyAndMigrate ? new StringBuilder() : null;
         char[] pwdCopy = request.connection().isWebDav() ? request.webDavPassword() : null;
         VaultOpenRequest.WebDavPasswordPersistence persistence = request.webDavPasswordPersistence();
         GazoVaultService sourceVault = v;
         Path migrationSnapshot = null;
         MediaCounts sourceCounts = null;
+        MediaCounts[] destinationCountsHolder = new MediaCounts[1];
+        if (migrationReport != null) {
+            migrationReport.append("開始: ").append(DELETED_TIME_FORMAT.format(LocalDateTime.now())).append('\n');
+            migrationReport.append("移行元: ")
+                    .append(sourceVault == null ? "(なし)" : sourceVault.getVaultDisplayLocation())
+                    .append('\n');
+            migrationReport.append("移行先: ").append(request.connection().displayLabel()).append('\n');
+        }
         if (copyAndMigrate) {
             if (sourceVault == null) {
                 if (pwdCopy != null) {
                     Arrays.fill(pwdCopy, '\0');
+                }
+                if (migrationReport != null) {
+                    migrationReport.append("結果: 失敗 (移行元アルバムが見つかりません)\n");
+                    saveMigrationReportQuietly(migrationReport);
                 }
                 GazoFx.showError("アルバム変更エラー", "移行元アルバムが見つかりません。");
                 return;
@@ -119,11 +138,22 @@ public final class MainWindowVaultActions {
                 if (pwdCopy != null) {
                     Arrays.fill(pwdCopy, '\0');
                 }
+                if (migrationReport != null) {
+                    migrationReport.append("結果: キャンセル (バックアップ確認で中断)\n");
+                    saveMigrationReportQuietly(migrationReport);
+                }
                 return;
             }
             host.setMainWindowBusy.accept(true, "移行準備中…");
             try {
                 sourceCounts = readMediaCounts(sourceVault);
+                if (migrationReport != null) {
+                    migrationReport.append("移行元件数: images=")
+                            .append(sourceCounts.images())
+                            .append(", videos=")
+                            .append(sourceCounts.videos())
+                            .append('\n');
+                }
                 migrationSnapshot =
                         createMigrationSnapshot(
                                 sourceVault,
@@ -135,6 +165,12 @@ public final class MainWindowVaultActions {
                     Arrays.fill(pwdCopy, '\0');
                 }
                 host.setMainWindowBusy.accept(false, "");
+                if (migrationReport != null) {
+                    migrationReport.append("結果: 失敗 (スナップショット作成失敗) ")
+                            .append(e.getMessage())
+                            .append('\n');
+                    saveMigrationReportQuietly(migrationReport);
+                }
                 GazoFx.showError("アルバム変更エラー", "コピー元の読み取りに失敗しました: " + e.getMessage());
                 return;
             }
@@ -153,11 +189,19 @@ public final class MainWindowVaultActions {
                         if (pwdCopy != null) {
                             Arrays.fill(pwdCopy, '\0');
                         }
+                        if (migrationReport != null) {
+                            migrationReport.append("結果: キャンセル (解錠キャンセル)\n");
+                            saveMigrationReportQuietly(migrationReport);
+                        }
                         return;
                     }
                     if (err != null) {
                         if (pwdCopy != null) {
                             Arrays.fill(pwdCopy, '\0');
+                        }
+                        if (migrationReport != null) {
+                            migrationReport.append("結果: 失敗 (接続切替) ").append(err.getMessage()).append('\n');
+                            saveMigrationReportQuietly(migrationReport);
                         }
                         GazoFx.showError("アルバム変更エラー", err.getMessage());
                         return;
@@ -170,10 +214,22 @@ public final class MainWindowVaultActions {
                     host.updateVaultPathLabel.run();
                     host.refreshAfterVaultChanged.run();
                     if (copyAndMigrate && sourceCountsForMigration != null) {
+                        Path reportPath = null;
+                        if (migrationReport != null && destinationCountsHolder[0] != null) {
+                            migrationReport.append("移行先件数: images=")
+                                    .append(destinationCountsHolder[0].images())
+                                    .append(", videos=")
+                                    .append(destinationCountsHolder[0].videos())
+                                    .append('\n');
+                            migrationReport.append("結果: 成功\n");
+                            reportPath = saveMigrationReportQuietly(migrationReport);
+                        }
                         GazoFx.showWarn(
                                 "移行検証",
                                 "画像 " + sourceCountsForMigration.images() + " 件 / 動画 "
-                                        + sourceCountsForMigration.videos() + " 件で一致しました。");
+                                        + sourceCountsForMigration.videos()
+                                        + " 件で一致しました。"
+                                        + (reportPath == null ? "" : "\nレポート: " + reportPath));
                     }
                 },
                 newVault -> {
@@ -190,8 +246,18 @@ public final class MainWindowVaultActions {
                                                                 progress.totalFiles(),
                                                                 progress.currentRelativePath()))));
                         MediaCounts destinationCounts = readMediaCounts(newVault);
+                        destinationCountsHolder[0] = destinationCounts;
                         if (sourceCountsForMigration != null
                                 && !sourceCountsForMigration.equals(destinationCounts)) {
+                            if (migrationReport != null) {
+                                migrationReport.append("移行先件数: images=")
+                                        .append(destinationCounts.images())
+                                        .append(", videos=")
+                                        .append(destinationCounts.videos())
+                                        .append('\n');
+                                migrationReport.append("結果: 失敗 (件数不一致)\n");
+                                saveMigrationReportQuietly(migrationReport);
+                            }
                             throw new IOException(
                                     "移行後の件数が一致しません。"
                                             + " source(images="
@@ -254,6 +320,64 @@ public final class MainWindowVaultActions {
         Thread t = new Thread(task, "gazo-rebuild-thumbnails");
         t.setDaemon(true);
         t.start();
+    }
+
+    public void restoreRecentlyDeletedImages(Stage stage) {
+        GazoVaultService v = host.vault.get();
+        if (v == null) {
+            return;
+        }
+        List<GazoVaultService.RecentlyDeletedImage> recent;
+        try {
+            recent = v.listRecentlyDeletedImages(20);
+        } catch (IOException e) {
+            GazoFx.showError("復元エラー", e.getMessage());
+            return;
+        }
+        if (recent.isEmpty()) {
+            GazoFx.showWarn("画像を復元", "復元できる最近削除した画像はありません。");
+            return;
+        }
+        StringBuilder preview = new StringBuilder();
+        for (int i = 0; i < recent.size(); i++) {
+            GazoVaultService.RecentlyDeletedImage one = recent.get(i);
+            String when = DELETED_TIME_FORMAT.format(one.deletedAt().atZone(ZoneId.systemDefault()));
+            preview.append("・ ").append(one.fileName()).append(" (").append(when).append(")\n");
+        }
+        ButtonType restoreOne = new ButtonType("最新1件を復元");
+        ButtonType restoreFive = new ButtonType("最新5件を復元");
+        ButtonType restoreAll = new ButtonType("表示中をすべて復元");
+        Alert confirm =
+                new Alert(
+                        Alert.AlertType.CONFIRMATION,
+                        "最近削除した画像を復元します。\n\n" + preview,
+                        restoreOne,
+                        restoreFive,
+                        restoreAll,
+                        ButtonType.CANCEL);
+        confirm.initOwner(stage);
+        confirm.setTitle("画像を復元");
+        confirm.setHeaderText("復元する件数を選択してください");
+        Optional<ButtonType> selected = confirm.showAndWait();
+        if (selected.isEmpty() || selected.get() == ButtonType.CANCEL) {
+            return;
+        }
+        int limit = selected.get() == restoreOne ? 1 : (selected.get() == restoreFive ? 5 : recent.size());
+        try {
+            GazoVaultService.RestoreDeletedImagesResult result = v.restoreRecentlyDeletedImages(limit);
+            host.refreshAfterVaultChanged.run();
+            if (result.failedMessages().isEmpty()) {
+                GazoFx.showWarn("画像を復元", result.restoredCount() + " 件を復元しました。");
+            } else {
+                GazoFx.showError(
+                        "復元エラー",
+                        result.restoredCount()
+                                + " 件を復元しましたが、一部失敗しました。\n"
+                                + String.join("\n", result.failedMessages()));
+            }
+        } catch (IOException e) {
+            GazoFx.showError("復元エラー", e.getMessage());
+        }
     }
 
     private static boolean shouldOfferMigration(
@@ -396,6 +520,22 @@ public final class MainWindowVaultActions {
                     }
                 }
             }
+        }
+    }
+
+    private static Path saveMigrationReportQuietly(StringBuilder report) {
+        if (report == null || report.isEmpty()) {
+            return null;
+        }
+        try {
+            Path dir = Path.of(System.getProperty("user.home"), ".gazo", "reports");
+            Files.createDirectories(dir);
+            String stamp = MIGRATION_REPORT_STAMP.format(LocalDateTime.now());
+            Path file = dir.resolve("migration-" + stamp + ".txt");
+            Files.writeString(file, report.toString());
+            return file;
+        } catch (Exception ignored) {
+            return null;
         }
     }
 }

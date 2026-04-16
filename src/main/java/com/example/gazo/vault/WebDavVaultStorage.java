@@ -10,6 +10,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -27,11 +28,13 @@ import java.util.stream.Stream;
  */
 public final class WebDavVaultStorage implements VaultStorage {
     private static final String META_FILE_NAME = "sync-state.properties";
+    private static final DateTimeFormatter SYNC_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private final VaultConnection connection;
     private final WebDavClient client;
     private final Path localMirrorPath;
     private final Path metadataFilePath;
     private final String remoteRootPath;
+    private Instant lastSyncAt;
 
     public WebDavVaultStorage(VaultConnection connection, char[] webDavPassword) {
         this.connection = connection;
@@ -39,6 +42,7 @@ public final class WebDavVaultStorage implements VaultStorage {
         this.remoteRootPath = WebDavClient.normalizePath(connection.webDavBasePath());
         this.localMirrorPath = buildMirrorPath(connection);
         this.metadataFilePath = buildMetadataFilePath(connection);
+        this.lastSyncAt = loadLastSyncFromMetadata();
     }
 
     @Override
@@ -54,6 +58,16 @@ public final class WebDavVaultStorage implements VaultStorage {
     @Override
     public boolean isRemote() {
         return true;
+    }
+
+    @Override
+    public String syncStatusSummary() {
+        Instant t = lastSyncAt;
+        if (t == null || Instant.EPOCH.equals(t)) {
+            return "同期: 未完了";
+        }
+        String formatted = SYNC_TIME_FORMAT.format(t.atZone(ZoneId.systemDefault()));
+        return "最終同期: " + formatted;
     }
 
     @Override
@@ -360,6 +374,18 @@ public final class WebDavVaultStorage implements VaultStorage {
         }
         try (var out = Files.newOutputStream(metadataFilePath)) {
             p.store(out, "webdav sync state");
+        }
+        lastSyncAt = Instant.now();
+    }
+
+    private Instant loadLastSyncFromMetadata() {
+        try {
+            if (!Files.exists(metadataFilePath)) {
+                return null;
+            }
+            return Files.getLastModifiedTime(metadataFilePath).toInstant();
+        } catch (Exception e) {
+            return null;
         }
     }
 

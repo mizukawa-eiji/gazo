@@ -1,5 +1,7 @@
 package com.example.gazo;
 
+import com.example.gazo.vault.WebDavConnectionProbe;
+import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.scene.Node;
 import javafx.scene.control.ButtonBar;
@@ -78,6 +80,69 @@ public final class VaultConnectionDialogs {
         TextField usernameField = new TextField();
         PasswordField passwordField = new PasswordField();
         passwordField.setPromptText("WebDAV パスワード");
+        javafx.scene.control.Button testConnectionButton = new javafx.scene.control.Button("接続テスト");
+        Label webDavTestStatusLabel = new Label();
+        webDavTestStatusLabel.setStyle("-fx-text-fill: #4a5560; -fx-font-size: 11px;");
+        testConnectionButton.setOnAction(e -> {
+            webDavTestStatusLabel.setText("");
+            String endpoint = endpointField.getText().trim();
+            String basePath = basePathField.getText().trim();
+            String username = usernameField.getText().trim();
+            if (endpoint.isEmpty() || basePath.isEmpty() || username.isEmpty()) {
+                webDavTestStatusLabel.setText("WebDAV URL / アルバム パス / ユーザー名を入力してください。");
+                return;
+            }
+            VaultConnection probeConnection;
+            try {
+                probeConnection = VaultConnection.webDav(endpoint, basePath, username);
+            } catch (IllegalArgumentException ex) {
+                webDavTestStatusLabel.setText("入力値を確認してください。");
+                return;
+            }
+            char[] probePassword;
+            String typedPassword = passwordField.getText();
+            if (!typedPassword.isEmpty()) {
+                probePassword = typedPassword.toCharArray();
+            } else {
+                Optional<char[]> stored = VaultPathStore.loadStoredWebDavPassword(probeConnection);
+                if (stored.isEmpty()) {
+                    webDavTestStatusLabel.setText("接続テストにはパスワード入力または保存済みパスワードが必要です。");
+                    return;
+                }
+                probePassword = stored.get();
+            }
+            testConnectionButton.setDisable(true);
+            testConnectionButton.setText("テスト中...");
+            webDavTestStatusLabel.setText("接続を確認しています…");
+            Task<Void> testTask =
+                    new Task<>() {
+                        @Override
+                        protected Void call() throws Exception {
+                            WebDavConnectionProbe.test(probeConnection, probePassword);
+                            return null;
+                        }
+                    };
+            testTask.setOnSucceeded(ev -> {
+                Arrays.fill(probePassword, '\0');
+                testConnectionButton.setText("接続テスト");
+                testConnectionButton.setDisable(!webDavRadio.isSelected());
+                webDavTestStatusLabel.setText("接続に成功しました。");
+            });
+            testTask.setOnFailed(ev -> {
+                Arrays.fill(probePassword, '\0');
+                testConnectionButton.setText("接続テスト");
+                testConnectionButton.setDisable(!webDavRadio.isSelected());
+                Throwable ex = testTask.getException();
+                String msg =
+                        ex == null || ex.getMessage() == null || ex.getMessage().isBlank()
+                                ? "接続に失敗しました。"
+                                : ex.getMessage();
+                webDavTestStatusLabel.setText("接続に失敗しました: " + msg);
+            });
+            Thread t = new Thread(testTask, "gazo-webdav-connection-test");
+            t.setDaemon(true);
+            t.start();
+        });
         CheckBox rememberPassword =
                 new CheckBox("WebDAV パスワードを保存する（ホームの .gazo フォルダに暗号化して保存）");
 
@@ -99,6 +164,8 @@ public final class VaultConnectionDialogs {
         grid.add(new Label("WebDAV パスワード"), 0, 6);
         grid.add(passwordField, 1, 6, 2, 1);
         grid.add(rememberPassword, 1, 7, 2, 1);
+        grid.add(testConnectionButton, 1, 8);
+        grid.add(webDavTestStatusLabel, 2, 8);
         dialog.getDialogPane().setContent(grid);
 
         if (initial != null && initial.isWebDav()) {
@@ -122,6 +189,7 @@ public final class VaultConnectionDialogs {
             usernameField.setDisable(local);
             passwordField.setDisable(local);
             rememberPassword.setDisable(local);
+            testConnectionButton.setDisable(local);
         };
         localRadio.selectedProperty().addListener((obs, oldV, newV) -> updateEnabled.run());
         webDavRadio.selectedProperty().addListener((obs, oldV, newV) -> updateEnabled.run());
@@ -169,6 +237,10 @@ public final class VaultConnectionDialogs {
         basePathField.textProperty().addListener(refreshListener);
         usernameField.textProperty().addListener(refreshListener);
         passwordField.textProperty().addListener(refreshListener);
+        endpointField.textProperty().addListener((obs, oldV, newV) -> webDavTestStatusLabel.setText(""));
+        basePathField.textProperty().addListener((obs, oldV, newV) -> webDavTestStatusLabel.setText(""));
+        usernameField.textProperty().addListener((obs, oldV, newV) -> webDavTestStatusLabel.setText(""));
+        passwordField.textProperty().addListener((obs, oldV, newV) -> webDavTestStatusLabel.setText(""));
 
         dialog.setResultConverter(btn -> {
             if (btn != ok) {

@@ -29,6 +29,13 @@ public interface VaultStorage extends AutoCloseable {
         // no-op
     }
 
+    /**
+     * UI 表示用の同期ステータス要約。
+     */
+    default String syncStatusSummary() {
+        return "ローカル保存";
+    }
+
     @Override
     default void close() throws IOException {
         // no-op
