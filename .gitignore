@@ -24,6 +24,7 @@ bin/
 
 # IDE — VS Code (optional: uncomment if you prefer not to commit local settings)
 # .vscode/
+.cursor/
 
 # OS
 .DS_Store
