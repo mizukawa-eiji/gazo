@@ -158,14 +158,14 @@ public final class CliImport {
 
         GazoVaultService vault = new GazoVaultService(connection, webDavPassword);
         if (!vault.vaultExists()) {
-            err("Vault が見つかりません: " + connection.displayLabel());
+            err("アルバムが見つかりません: " + connection.displayLabel());
             System.exit(2);
         }
 
         try {
             vault.unlock(new String(passphrase));
         } catch (MasterkeyLoadingFailedException | IOException e) {
-            err("Vault のロック解除に失敗しました（パスフレーズの誤りなど）: " + e.getMessage());
+            err("アルバムのロック解除に失敗しました（パスフレーズの誤りなど）: " + e.getMessage());
             System.exit(2);
         } finally {
             Arrays.fill(passphrase, '\0');
@@ -281,7 +281,7 @@ public final class CliImport {
         }
         Console console = System.console();
         if (console != null) {
-            return console.readPassword("Vault パスフレーズ: ");
+            return console.readPassword("アルバム パスフレーズ: ");
         }
         return null;
     }
@@ -308,11 +308,11 @@ public final class CliImport {
         out("  java -jar gazo.jar --help");
         out("");
         out("import のオプション:");
-        out("  --vault <dir>     Vault のディレクトリ（省略時は設定の最後に使ったパス、なければ ~/.gazo/vault）");
+        out("  --vault <dir>     アルバムのディレクトリ（省略時は設定の最後に使ったパス、なければ ~/.gazo/vault）");
         out("  -r, --recursive   ディレクトリ指定時、サブフォルダも再帰的に取り込む");
         out("  --password <str>  パスフレーズ（非推奨。環境変数 GAZO_PASSPHRASE の利用を推奨）");
         out("  --webdav-endpoint <url>   WebDAV 接続 URL（例: https://host/remote.php/dav/files/user）");
-        out("  --webdav-base-path <path> Vault を置く WebDAV 内パス（例: /gazo-vault）");
+        out("  --webdav-base-path <path> アルバムを置く WebDAV 内パス（例: /gazo-vault）");
         out("  --webdav-username <name>  WebDAV ユーザー名");
         out("  --webdav-password <str>   WebDAV パスワード（非推奨。環境変数 GAZO_WEBDAV_PASSWORD 推奨）");
         out("  --                以降をすべてパスとして扱う");

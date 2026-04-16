@@ -12,6 +12,7 @@ import javafx.scene.control.RadioButton;
 import javafx.scene.control.TextField;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.HBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 
@@ -28,7 +29,7 @@ public final class VaultConnectionDialogs {
 
     public static Optional<VaultOpenRequest> promptForOpenRequest(Stage owner, VaultConnection initial) {
         Dialog<VaultOpenRequest> dialog = new Dialog<>();
-        dialog.setTitle("Vault 接続先を選択");
+        dialog.setTitle("アルバムの場所を選択");
         if (owner != null) {
             dialog.initOwner(owner);
         }
@@ -44,10 +45,17 @@ public final class VaultConnectionDialogs {
 
         TextField localPathField = new TextField();
         localPathField.setPromptText("C:\\Users\\...\\vault");
+        Path defaultLocalVaultPath =
+                Path.of(System.getProperty("user.home"), ".gazo", "vault")
+                        .toAbsolutePath()
+                        .normalize();
+        javafx.scene.control.Button homeButton = new javafx.scene.control.Button("ホーム");
+        homeButton.setOnAction(e -> localPathField.setText(defaultLocalVaultPath.toString()));
         javafx.scene.control.Button browseButton = new javafx.scene.control.Button("参照...");
+        HBox localButtons = new HBox(6, homeButton, browseButton);
         browseButton.setOnAction(e -> {
             DirectoryChooser chooser = new DirectoryChooser();
-            chooser.setTitle("Vault ディレクトリを選択");
+            chooser.setTitle("アルバム ディレクトリを選択");
             String current = localPathField.getText().trim();
             if (!current.isEmpty()) {
                 Path p = Path.of(current);
@@ -78,13 +86,13 @@ public final class VaultConnectionDialogs {
         grid.setVgap(8);
         grid.setPadding(new Insets(10));
         grid.add(localRadio, 0, 0, 2, 1);
-        grid.add(new Label("ローカルVault"), 0, 1);
+        grid.add(new Label("ローカルアルバム"), 0, 1);
         grid.add(localPathField, 1, 1);
-        grid.add(browseButton, 2, 1);
+        grid.add(localButtons, 2, 1);
         grid.add(webDavRadio, 0, 2, 2, 1);
         grid.add(new Label("WebDAV URL"), 0, 3);
         grid.add(endpointField, 1, 3, 2, 1);
-        grid.add(new Label("Vault パス"), 0, 4);
+        grid.add(new Label("アルバム パス"), 0, 4);
         grid.add(basePathField, 1, 4, 2, 1);
         grid.add(new Label("ユーザー名"), 0, 5);
         grid.add(usernameField, 1, 5, 2, 1);
@@ -107,6 +115,7 @@ public final class VaultConnectionDialogs {
         Runnable updateEnabled = () -> {
             boolean local = localRadio.isSelected();
             localPathField.setDisable(!local);
+            homeButton.setDisable(!local);
             browseButton.setDisable(!local);
             endpointField.setDisable(local);
             basePathField.setDisable(local);

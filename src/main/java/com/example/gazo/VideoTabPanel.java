@@ -60,9 +60,13 @@ public final class VideoTabPanel {
 
     public void refreshList() {
         gallery.getChildren().clear();
+        var vault = host.vault().get();
+        if (vault == null) {
+            return;
+        }
         try {
-            Map<String, Set<String>> tagMap = host.vault().tagsByFileName();
-            for (Path p : listFilteredVideos(tagMap)) {
+            Map<String, Set<String>> tagMap = vault.tagsByFileName();
+            for (Path p : listFilteredVideos(vault, tagMap)) {
                 gallery.getChildren().add(createVideoCard(p));
             }
         } catch (IOException e) {
@@ -70,10 +74,11 @@ public final class VideoTabPanel {
         }
     }
 
-    private List<Path> listFilteredVideos(Map<String, Set<String>> tagsByFile) throws IOException {
+    private List<Path> listFilteredVideos(
+            com.example.gazo.vault.GazoVaultService vault, Map<String, Set<String>> tagsByFile) throws IOException {
         Set<String> active = host.activeTagFilters().get();
         List<Path> filtered = new ArrayList<>();
-        for (Path p : host.vault().listVideos()) {
+        for (Path p : vault.listVideos()) {
             if (host.isPendingDelete().test(p)) {
                 continue;
             }
@@ -220,6 +225,10 @@ public final class VideoTabPanel {
     }
 
     public void addVideos(Stage stage) {
+        var vault = host.vault().get();
+        if (vault == null) {
+            return;
+        }
         FileChooser chooser = new FileChooser();
         chooser.setTitle("動画を選択");
         chooser.getExtensionFilters()
@@ -232,7 +241,7 @@ public final class VideoTabPanel {
             for (java.io.File f : files) {
                 host.setImportStatusLabel().accept(f.getName());
                 try {
-                    host.vault().importVideo(f.toPath());
+                    vault.importVideo(f.toPath());
                 } catch (IOException e) {
                     GazoFx.showError("保存エラー", f.getName() + " の保存に失敗しました: " + e.getMessage());
                 }

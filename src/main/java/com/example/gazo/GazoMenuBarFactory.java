@@ -43,7 +43,7 @@ public final class GazoMenuBarFactory {
         bulkRemoveMenu.setOnAction(e -> onBulkRemoveTags.run());
         MenuItem deleteCheckedImagesMenu = new MenuItem("チェックした画像を削除…");
         deleteCheckedImagesMenu.setOnAction(e -> onDeleteCheckedImages.run());
-        MenuItem changeVaultMenu = new MenuItem("Vault変更…");
+        MenuItem changeVaultMenu = new MenuItem("アルバム変更…");
         changeVaultMenu.setOnAction(e -> onChangeVault.run());
         MenuItem conflictThresholdMenu = new MenuItem("競合比較しきい値設定…");
         conflictThresholdMenu.setOnAction(e -> onConflictThresholdSettings.run());

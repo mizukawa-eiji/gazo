@@ -28,7 +28,7 @@ public final class ImageGalleryLeadingButtons {
         Button clearSelection = new Button("クリア");
         clearSelection.setOnAction(e -> onClearListSelection.run());
         Button galleryDeleteCheckedButton = new Button("選択を削除");
-        galleryDeleteCheckedButton.setTooltip(new Tooltip("チェックした画像を Vault から削除（元に戻せません）"));
+        galleryDeleteCheckedButton.setTooltip(new Tooltip("チェックした画像をアルバムから削除（元に戻せません）"));
         galleryDeleteCheckedButton.setOnAction(e -> onDeleteCheckedFromVault.run());
         Button canvasHub = new Button("選択画像でキャンバス作成");
         canvasHub.setOnAction(e -> onCanvasHub.run());

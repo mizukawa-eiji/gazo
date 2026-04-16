@@ -13,7 +13,7 @@ import java.util.function.Supplier;
  * 動画タブが参照する依存関係（Vault、タグ絞り込み、インポート時の UI）。
  */
 public record VideoTabHost(
-        GazoVaultService vault,
+        Supplier<GazoVaultService> vault,
         Stage primaryStage,
         Supplier<Set<String>> activeTagFilters,
         Predicate<Path> isPendingDelete,

@@ -64,7 +64,7 @@ public final class WebDavVaultStorage implements VaultStorage {
             client.ensureDirectory(remoteRootPath);
             if (!client.directoryExists(remoteRootPath)) {
                 throw new IOException(
-                        "WebDAV 上に Vault 用フォルダを作成できませんでした。エンドポイント・ベースパス・サーバーの WebDAV 設定を確認してください: "
+                        "WebDAV 上にアルバム用フォルダを作成できませんでした。エンドポイント・ベースパス・サーバーの WebDAV 設定を確認してください: "
                                 + remoteRootPath);
             }
             saveSyncState(new HashMap<>());

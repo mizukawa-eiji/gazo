@@ -58,7 +58,7 @@ public final class VaultUnlockFlow {
         }
         BorderPane shell = new BorderPane();
         shell.setStyle("-fx-background-color: linear-gradient(to bottom, #f2efe7, #ebe5d8);");
-        stage.setTitle("Gazo — 暗号化フォルダに保存する写真ビューア (JavaFX)");
+        stage.setTitle("Gazo — アルバムに保存する画像ビューア");
         GazoFx.applyAppIcons(stage);
         VBox topStrip = new VBox(16);
         topStrip.setAlignment(Pos.TOP_CENTER);
@@ -67,7 +67,7 @@ public final class VaultUnlockFlow {
         if (iconGraphic != null) {
             topStrip.getChildren().add(iconGraphic);
         }
-        Label shellHint = new Label("Vault を準備しています…");
+        Label shellHint = new Label("アルバムを準備しています…");
         shellHint.setStyle("-fx-text-fill: #5c564a; -fx-font-size: 14px;");
         topStrip.getChildren().add(shellHint);
         shellHintLabel = shellHint;
@@ -130,8 +130,7 @@ public final class VaultUnlockFlow {
         }
     }
 
-    private void showShellProgress(String uiMessage, String logLine) {
-        System.err.println("[Gazo] " + logLine);
+    private void showShellProgress(String uiMessage) {
         Platform.runLater(
                 () -> {
                     if (shellHintLabel != null) {
@@ -178,7 +177,7 @@ public final class VaultUnlockFlow {
             Consumer<char[]> onSubmit,
             Runnable onCancel,
             Runnable onSwitchConnection) {
-        Label title = new Label("Vault のロックを解除");
+        Label title = new Label("アルバムのロックを解除");
         title.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; " + VAULT_FORM_LABEL_TEXT);
         Label msg = new Label("パスワードを入力してください。");
         msg.setStyle(VAULT_FORM_LABEL_TEXT);
@@ -235,7 +234,7 @@ public final class VaultUnlockFlow {
             Consumer<char[]> onSuccess,
             Runnable onCancel,
             Runnable onSwitchConnection) {
-        Label title = new Label("新しい Vault を作成");
+        Label title = new Label("新しいアルバムを作成");
         title.setStyle("-fx-font-size: 16px; -fx-font-weight: bold; " + VAULT_FORM_LABEL_TEXT);
         Label msg = new Label("パスワードを設定してください。");
         msg.setStyle(VAULT_FORM_LABEL_TEXT);
@@ -317,15 +316,34 @@ public final class VaultUnlockFlow {
             Runnable onSwitchConnection,
             Runnable onUnlocked,
             Runnable onCancelled) {
-        if (!targetVault.vaultExists()) {
-            showCreateVaultPasswordInline(
-                    stage,
-                    pass -> runVaultCreateInBackground(stage, targetVault, pass, onUnlocked, onCancelled),
-                    onCancelled,
-                    onSwitchConnection);
-            return;
-        }
-        runUnlockLoop(stage, targetVault, null, onSwitchConnection, onUnlocked, onCancelled);
+        showShellProgress("アルバムの状態を確認しています…（WebDAV は少し時間がかかることがあります）");
+        CompletableFuture.supplyAsync(targetVault::vaultExists, VAULT_IO_EXECUTOR)
+                .whenComplete(
+                        (exists, err) ->
+                                Platform.runLater(
+                                        () -> {
+                                            if (err != null) {
+                                                Throwable t = unwrap(err);
+                                                String msg =
+                                                        t.getMessage() == null || t.getMessage().isBlank()
+                                                                ? t.getClass().getSimpleName()
+                                                                : t.getMessage();
+                                                GazoFx.showError("アルバムを開けませんでした", msg);
+                                                onCancelled.run();
+                                                return;
+                                            }
+                                            if (!Boolean.TRUE.equals(exists)) {
+                                                showCreateVaultPasswordInline(
+                                                        stage,
+                                                        pass ->
+                                                                runVaultCreateInBackground(
+                                                                        stage, targetVault, pass, onUnlocked, onCancelled),
+                                                        onCancelled,
+                                                        onSwitchConnection);
+                                                return;
+                                            }
+                                            runUnlockLoop(stage, targetVault, null, onSwitchConnection, onUnlocked, onCancelled);
+                                        }));
     }
 
     private void runVaultCreateInBackground(
@@ -336,9 +354,7 @@ public final class VaultUnlockFlow {
             Runnable onCancelled) {
         char[] copy = Arrays.copyOf(pass, pass.length);
         Arrays.fill(pass, '\0');
-        showShellProgress(
-                "Vault を作成しています…（WebDAV の場合は同期に時間がかかることがあります）",
-                "Vault 作成を開始しました（バックグラウンドで処理中）");
+        showShellProgress("アルバムを作成しています…（WebDAV の場合は同期に時間がかかることがあります）");
         CompletableFuture.runAsync(
                         () -> {
                             try {
@@ -362,7 +378,7 @@ public final class VaultUnlockFlow {
                                                         t.getMessage() == null || t.getMessage().isBlank()
                                                                 ? t.getClass().getSimpleName()
                                                                 : t.getMessage();
-                                                GazoFx.showError("Vault を作成できませんでした", msg);
+                                                GazoFx.showError("アルバムを作成できませんでした", msg);
                                                 onCancelled.run();
                                             }
                                         }));
@@ -406,7 +422,7 @@ public final class VaultUnlockFlow {
             Runnable onCancelled) {
         char[] copy = Arrays.copyOf(pass, pass.length);
         Arrays.fill(pass, '\0');
-        showShellProgress("Vault を解錠しています…", "Vault 解錠を開始しました（バックグラウンドで処理中）");
+        showShellProgress("アルバムを解錠しています…");
         CompletableFuture.runAsync(
                         () -> {
                             try {
@@ -447,7 +463,7 @@ public final class VaultUnlockFlow {
                                                         t.getMessage() == null || t.getMessage().isBlank()
                                                                 ? t.getClass().getSimpleName()
                                                                 : t.getMessage();
-                                                GazoFx.showError("Vault を開けませんでした", msg);
+                                                GazoFx.showError("アルバムを開けませんでした", msg);
                                                 onCancelled.run();
                                                 return;
                                             }
@@ -456,7 +472,7 @@ public final class VaultUnlockFlow {
                                                     t.getMessage() == null || t.getMessage().isBlank()
                                                             ? t.getClass().getSimpleName()
                                                             : t.getMessage();
-                                            GazoFx.showError("Vault を開けませんでした", msg);
+                                            GazoFx.showError("アルバムを開けませんでした", msg);
                                             onCancelled.run();
                                         }));
     }

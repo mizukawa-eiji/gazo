@@ -22,6 +22,7 @@ import java.io.OutputStream;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
@@ -34,6 +35,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 /**
@@ -41,6 +43,7 @@ import java.util.stream.Stream;
  */
 public final class GazoVaultService implements AutoCloseable {
     public record SimilarPair(Path left, Path right, int distance) {}
+    public record CopyProgress(int copiedFiles, int totalFiles, String currentRelativePath) {}
 
     private static final URI DEFAULT_KEY_ID = URI.create(MasterkeyFileKeyLoader.SCHEME + ":masterkey.cryptomator");
     private static final String IMAGES_DIR = "images";
@@ -128,7 +131,7 @@ public final class GazoVaultService implements AutoCloseable {
 
     private void ensureUnlocked() {
         if (cryptoFileSystem == null || !cryptoFileSystem.isOpen()) {
-            throw new IllegalStateException("Vault is not unlocked");
+            throw new IllegalStateException("Album is not unlocked");
         }
     }
 
@@ -319,6 +322,35 @@ public final class GazoVaultService implements AutoCloseable {
         return dest;
     }
 
+    /**
+     * この Vault の中身（平文ルート配下）を指定先へ丸ごとコピーする。
+     * 既存データは先に削除し、同一構成で置き換える。
+     */
+    public void copyAllContentTo(GazoVaultService destination) throws IOException {
+        Objects.requireNonNull(destination, "destination");
+        ensureUnlocked();
+        destination.replaceAllContentFromDirectory(cleartextRoot());
+    }
+
+    /**
+     * 指定ディレクトリ配下の内容で、この Vault の平文ルートを完全に置き換える。
+     */
+    public void replaceAllContentFromDirectory(Path sourceRoot) throws IOException {
+        replaceAllContentFromDirectory(sourceRoot, null);
+    }
+
+    public void replaceAllContentFromDirectory(Path sourceRoot, Consumer<CopyProgress> onProgress) throws IOException {
+        Objects.requireNonNull(sourceRoot, "sourceRoot");
+        ensureUnlocked();
+        if (!Files.isDirectory(sourceRoot)) {
+            throw new IOException("移行元ディレクトリが見つかりません: " + sourceRoot);
+        }
+        Path destinationRoot = cleartextRoot();
+        clearDirectoryContents(destinationRoot);
+        copyDirectoryContents(sourceRoot, destinationRoot, onProgress);
+        flushStorageChanges();
+    }
+
     private Path resolveUniqueVideoPath(String originalFileName) throws IOException {
         Path dir = videosDirectory();
         String baseName = originalFileName;
@@ -335,6 +367,59 @@ public final class GazoVaultService implements AutoCloseable {
             counter++;
         }
         return candidate;
+    }
+
+    private static void clearDirectoryContents(Path dir) throws IOException {
+        if (!Files.exists(dir)) {
+            Files.createDirectories(dir);
+            return;
+        }
+        try (Stream<Path> stream = Files.walk(dir)) {
+            for (Path p : stream.sorted(Comparator.reverseOrder()).toList()) {
+                if (!p.equals(dir)) {
+                    Files.deleteIfExists(p);
+                }
+            }
+        }
+    }
+
+    private static void copyDirectoryContents(Path sourceRoot, Path destinationRoot, Consumer<CopyProgress> onProgress)
+            throws IOException {
+        List<Path> filesToCopy;
+        try (Stream<Path> stream = Files.walk(sourceRoot)) {
+            filesToCopy =
+                    stream.filter(Files::isRegularFile)
+                            .filter(source -> !source.equals(sourceRoot))
+                            .toList();
+        }
+        int totalFiles = filesToCopy.size();
+        int copied = 0;
+        if (onProgress != null) {
+            onProgress.accept(new CopyProgress(0, totalFiles, ""));
+        }
+        try (Stream<Path> stream = Files.walk(sourceRoot)) {
+            for (Path source : stream.toList()) {
+                if (source.equals(sourceRoot)) {
+                    continue;
+                }
+                Path relative = sourceRoot.relativize(source);
+                Path target = destinationRoot.resolve(relative);
+                if (Files.isDirectory(source)) {
+                    Files.createDirectories(target);
+                } else if (Files.isRegularFile(source)) {
+                    Path parent = target.getParent();
+                    if (parent != null) {
+                        Files.createDirectories(parent);
+                    }
+                    Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+                    copied++;
+                    if (onProgress != null) {
+                        String rel = relative.toString().replace('\\', '/');
+                        onProgress.accept(new CopyProgress(copied, totalFiles, rel));
+                    }
+                }
+            }
+        }
     }
 
     /**

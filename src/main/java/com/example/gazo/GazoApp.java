@@ -218,7 +218,7 @@ public final class GazoApp extends Application {
                         if (pwdCopy != null) {
                             Arrays.fill(pwdCopy, '\0');
                         }
-                        GazoFx.showError("Vault を開けませんでした", err.getMessage());
+                        GazoFx.showError("アルバムを開けませんでした", err.getMessage());
                         Platform.exit();
                         return;
                     }
@@ -351,7 +351,7 @@ public final class GazoApp extends Application {
         videoTab =
                 new VideoTabPanel(
                         new VideoTabHost(
-                                vault,
+                                () -> vault,
                                 stage,
                                 this::galleryActiveTagFiltersCopy,
                                 pendingDeletePaths::contains,
@@ -562,7 +562,7 @@ public final class GazoApp extends Application {
         StackPane rootStack = new StackPane(root, appBusyPane);
 
         Scene scene = new Scene(rootStack, 920, 680);
-        stage.setTitle("Gazo — 暗号化フォルダに保存する写真ビューア (JavaFX)");
+        stage.setTitle("Gazo — アルバムに保存する画像ビューア");
         GazoFx.applyAppIcons(stage);
         stage.setScene(scene);
         stage.setResizable(true);
@@ -599,6 +599,13 @@ public final class GazoApp extends Application {
             canvasSelection.addAll(paths);
         } catch (IOException e) {
             GazoFx.showWarn("キャンバス選択の読込", e.getMessage());
+        } catch (IllegalStateException e) {
+            // 切替直後に一時的に未解錠扱いになるケースでは、選択を空として継続する。
+            if ("Album is not unlocked".equals(e.getMessage())) {
+                canvasSelection.clear();
+                return;
+            }
+            throw e;
         }
     }
 
@@ -638,7 +645,7 @@ public final class GazoApp extends Application {
     private void updateVaultPathLabel() {
         if (vaultPathLabel != null && vault != null) {
             String mode = vault.isRemoteVault() ? "WebDAV" : "Local";
-            vaultPathLabel.setText("Vault(" + mode + "): " + vault.getVaultDisplayLocation());
+            vaultPathLabel.setText("アルバム(" + mode + "): " + vault.getVaultDisplayLocation());
         }
     }
 

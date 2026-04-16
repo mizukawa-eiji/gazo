@@ -173,7 +173,7 @@ public final class VaultPathStore {
                 properties.store(out, "gazo settings");
             }
         } catch (IOException e) {
-            GazoFx.showWarn("設定保存エラー", "Vault パスの保存に失敗しました: " + e.getMessage());
+            GazoFx.showWarn("設定保存エラー", "アルバム パスの保存に失敗しました: " + e.getMessage());
         }
     }
 

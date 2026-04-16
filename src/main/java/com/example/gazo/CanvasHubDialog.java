@@ -116,7 +116,7 @@ public final class CanvasHubDialog {
     AtomicBoolean suppressLayoutChooser = new AtomicBoolean(false);
 
     Button overwriteSaveButton = new Button();
-    setCanvasHubIconButton(overwriteSaveButton, "💾", "上書き保存（現在のキャンバス一覧を Vault に記録）");
+    setCanvasHubIconButton(overwriteSaveButton, "💾", "上書き保存（現在のキャンバス一覧をアルバムに記録）");
     overwriteSaveButton.setOnAction(e -> app.persistCanvasSelectionToVaultWithFeedback(currentLayout.get()));
 
     Button addImagesButton = new Button();
@@ -136,7 +136,7 @@ public final class CanvasHubDialog {
 
     Label hubHint = new Label(
             "ギャラリーで「キャンバス対象」をチェックするか、「キャンバス編集」の「画像を追加…」／「ランダムピック」の「名前を付けて保存…」からキャンバスに取り込みます。"
-                    + "ツールバーの「上書き保存」で、現在のキャンバスの画像一覧を Vault に記録します。"
+                    + "ツールバーの「上書き保存」で、現在のキャンバスの画像一覧をアルバムに記録します。"
                     + "上部の「キャンバス」一覧で編集対象を切り替えると、切り替え前のキャンバスは自動で保存されます。"
                     + "ダイアログを閉じるだけでは、最後に表示していたキャンバスの一覧は保存されないので、閉じる前に「上書き保存」してください。"
                     + "「名前を付けて保存…」は現在の内容を保存したうえで別名のキャンバスを複製します。"
@@ -973,7 +973,7 @@ public final class CanvasHubDialog {
         List<String> allTagNames;
         try {
             if (app.vault.listImages().isEmpty()) {
-                GazoFx.showWarn("画像を追加", "Vault に画像がありません。");
+                GazoFx.showWarn("画像を追加", "アルバムに画像がありません。");
                 return;
             }
             allTagNames = new ArrayList<>(app.vault.listAllTags());
