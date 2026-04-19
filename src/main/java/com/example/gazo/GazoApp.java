@@ -473,6 +473,9 @@ public final class GazoApp extends Application {
                         () -> vaultActions.restoreRecentlyDeletedImages(stage),
                         () -> vaultActions.changeVaultPath(stage),
                         () -> vaultActions.backupVaultPhysically(stage),
+                        () -> vaultActions.registerPhysicalBackupMirror(stage),
+                        () -> vaultActions.syncPhysicalBackupMirror(stage),
+                        () -> vaultActions.clearPhysicalBackupMirrorRegistration(stage),
                         GazoFx::showConflictThresholdSettingsDialog,
                         this::updateGalleryListSelectionDependentControls);
         menuGalleryTagBulkAdd = menus.menuGalleryTagBulkAdd();

@@ -23,7 +23,7 @@ out/
 bin/
 
 # IDE — VS Code (optional: uncomment if you prefer not to commit local settings)
-# .vscode/
+.vscode/
 .cursor/
 
 # OS

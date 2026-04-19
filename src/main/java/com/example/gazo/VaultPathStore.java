@@ -3,12 +3,17 @@ package com.example.gazo;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
@@ -36,7 +41,12 @@ public final class VaultPathStore {
     private static final String CONFLICT_DHASH_SAME_MAX = "conflict.dhash.sameMax";
     private static final String CONFLICT_DHASH_NEAR_MAX = "conflict.dhash.nearMax";
 
+    private static final String CONFIG_PREFIX_PHYSICAL_BACKUP_MIRROR = "physicalBackupMirror.";
+
     private static final Set<String> VALID_LIST_VIEW_SIZES = Set.of("小", "中", "大");
+
+    /** テスト用。null で {@code ~/.gazo/settings.properties} に戻す。 */
+    static volatile Path configFileOverrideForTests;
 
     private VaultPathStore() {
     }
@@ -68,11 +78,120 @@ public final class VaultPathStore {
     }
 
     private static Path appConfigDir() {
+        if (configFileOverrideForTests != null) {
+            Path parent = configFileOverrideForTests.getParent();
+            return parent != null ? parent : Paths.get(".");
+        }
         return Paths.get(System.getProperty("user.home"), APP_DIR_NAME);
     }
 
     private static Path appConfigFile() {
+        if (configFileOverrideForTests != null) {
+            return configFileOverrideForTests;
+        }
         return appConfigDir().resolve(CONFIG_FILE_NAME);
+    }
+
+    /**
+     * 物理バックアップ同期のキーに使う、接続先を一意に表す文字列（WebDAV ミラー用キーと同じ考え方）。
+     */
+    public static String stableVaultKeyForPhysicalBackup(VaultConnection connection) {
+        Objects.requireNonNull(connection, "connection");
+        if (connection.isLocal()) {
+            Path p = Objects.requireNonNull(connection.localPath(), "localPath");
+            return "local:" + p.toAbsolutePath().normalize();
+        }
+        return "webdav:"
+                + connection.webDavEndpoint()
+                + "|"
+                + connection.webDavBasePath()
+                + "|"
+                + connection.webDavUsername();
+    }
+
+    static String physicalBackupMirrorPropertyKey(VaultConnection connection) {
+        return CONFIG_PREFIX_PHYSICAL_BACKUP_MIRROR + sha256Base64Url(stableVaultKeyForPhysicalBackup(connection));
+    }
+
+    private static String sha256Base64Url(String value) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest(value.getBytes(StandardCharsets.UTF_8));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(d);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
+    public static Optional<Path> loadPhysicalBackupMirrorRoot(VaultConnection connection) {
+        if (connection == null) {
+            return Optional.empty();
+        }
+        Path file = appConfigFile();
+        if (!Files.exists(file)) {
+            return Optional.empty();
+        }
+        Properties properties = new Properties();
+        try (InputStream in = Files.newInputStream(file)) {
+            properties.load(in);
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+        String raw = properties.getProperty(physicalBackupMirrorPropertyKey(connection), "").trim();
+        if (raw.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Paths.get(raw).toAbsolutePath().normalize());
+        } catch (Exception e) {
+            return Optional.empty();
+        }
+    }
+
+    public static void savePhysicalBackupMirrorRoot(VaultConnection connection, Path mirrorRoot) {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(mirrorRoot, "mirrorRoot");
+        Path normalized = mirrorRoot.toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(appConfigDir());
+            Path file = appConfigFile();
+            Properties properties = new Properties();
+            if (Files.exists(file)) {
+                try (InputStream in = Files.newInputStream(file)) {
+                    properties.load(in);
+                }
+            }
+            properties.setProperty(physicalBackupMirrorPropertyKey(connection), normalized.toString());
+            try (OutputStream out = Files.newOutputStream(file)) {
+                properties.store(out, "gazo settings");
+            }
+        } catch (IOException e) {
+            GazoFx.showWarn("設定保存エラー", "物理バックアップ先の保存に失敗しました: " + e.getMessage());
+        }
+    }
+
+    public static void clearPhysicalBackupMirrorRoot(VaultConnection connection) {
+        if (connection == null) {
+            return;
+        }
+        Path file = appConfigFile();
+        if (!Files.exists(file)) {
+            return;
+        }
+        Properties properties = new Properties();
+        try (InputStream in = Files.newInputStream(file)) {
+            properties.load(in);
+        } catch (Exception e) {
+            return;
+        }
+        properties.remove(physicalBackupMirrorPropertyKey(connection));
+        try {
+            try (OutputStream out = Files.newOutputStream(file)) {
+                properties.store(out, "gazo settings");
+            }
+        } catch (IOException e) {
+            GazoFx.showWarn("設定保存エラー", "物理バックアップ先の解除に失敗しました: " + e.getMessage());
+        }
     }
 
     private static Path defaultVaultPath() {

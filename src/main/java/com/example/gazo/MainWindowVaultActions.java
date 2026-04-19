@@ -9,6 +9,7 @@ import javafx.geometry.Insets;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonBar.ButtonData;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.RadioButton;
@@ -26,9 +27,12 @@ import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -190,6 +194,254 @@ public final class MainWindowVaultActions {
                                             }
                                             GazoFx.showWarn("物理バックアップ", "完了しました:\n" + destRoot);
                                         }));
+    }
+
+    /**
+     * 現在の Vault に対し、差分同期の宛先となるローカルフォルダを登録する（settings.properties）。
+     */
+    public void registerPhysicalBackupMirror(Stage stage) {
+        GazoVaultService v = host.vault.get();
+        VaultConnection conn = host.currentConnection.get();
+        if (v == null || conn == null) {
+            GazoFx.showError("物理バックアップ先", "アルバムが開かれていません。");
+            return;
+        }
+        Path vaultRoot = v.getVaultPath().toAbsolutePath().normalize();
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("物理バックアップ先（ミラー先のルートフォルダを選択）");
+        java.io.File chosen = chooser.showDialog(stage);
+        if (chosen == null) {
+            return;
+        }
+        Path mirrorRoot = chosen.toPath().toAbsolutePath().normalize();
+        if (isUnsafePhysicalBackupMirrorPair(vaultRoot, mirrorRoot)) {
+            GazoFx.showError(
+                    "物理バックアップ先",
+                    "アルバムの場所と同じ、または一方が他方の内側にあるフォルダは選べません。");
+            return;
+        }
+        VaultPathStore.savePhysicalBackupMirrorRoot(conn, mirrorRoot);
+        GazoFx.showWarn("物理バックアップ先", "登録しました:\n" + mirrorRoot);
+    }
+
+    /** 登録済みの物理バックアップ先を解除する。 */
+    public void clearPhysicalBackupMirrorRegistration(Stage stage) {
+        VaultConnection conn = host.currentConnection.get();
+        if (conn == null) {
+            GazoFx.showError("物理バックアップ先", "接続情報がありません。");
+            return;
+        }
+        Optional<Path> existing = VaultPathStore.loadPhysicalBackupMirrorRoot(conn);
+        if (existing.isEmpty()) {
+            GazoFx.showWarn("物理バックアップ先", "登録されたバックアップ先はありません。");
+            return;
+        }
+        Alert confirm =
+                new Alert(
+                        Alert.AlertType.CONFIRMATION,
+                        "登録を解除しますか？\n" + existing.get(),
+                        ButtonType.OK,
+                        ButtonType.CANCEL);
+        confirm.initOwner(stage);
+        confirm.setTitle("物理バックアップ先");
+        confirm.setHeaderText("登録の解除");
+        Optional<ButtonType> ok = confirm.showAndWait();
+        if (ok.isEmpty() || ok.get() != ButtonType.OK) {
+            return;
+        }
+        VaultPathStore.clearPhysicalBackupMirrorRoot(conn);
+        GazoFx.showWarn("物理バックアップ先", "登録を解除しました。");
+    }
+
+    /**
+     * 登録済みフォルダへ、暗号化 Vault ツリーの差分コピー（任意でバックアップ側のみにあるファイルを削除）を行う。
+     */
+    public void syncPhysicalBackupMirror(Stage stage) {
+        GazoVaultService v = host.vault.get();
+        VaultConnection conn = host.currentConnection.get();
+        if (v == null || conn == null) {
+            GazoFx.showError("バックアップと同期", "アルバムが開かれていません。");
+            return;
+        }
+        Optional<Path> mirrorOpt = VaultPathStore.loadPhysicalBackupMirrorRoot(conn);
+        if (mirrorOpt.isEmpty()) {
+            GazoFx.showWarn(
+                    "バックアップと同期",
+                    "物理バックアップ先が未登録です。\nファイルメニューから「物理バックアップ先を登録…」を実行してください。");
+            return;
+        }
+        Path vaultRoot = v.getVaultPath().toAbsolutePath().normalize();
+        Path mirrorRoot = mirrorOpt.get().toAbsolutePath().normalize();
+        if (isUnsafePhysicalBackupMirrorPair(vaultRoot, mirrorRoot)) {
+            GazoFx.showError(
+                    "バックアップと同期",
+                    "登録先がアルバムと重なっています。登録を解除し、別フォルダを登録してください。");
+            return;
+        }
+        CheckBox deleteOrphans = new CheckBox("Vault に無いファイルをバックアップから削除する（完全ミラー・危険）");
+        deleteOrphans.setSelected(false);
+        Label msg =
+                new Label(
+                        "次のフォルダへ、現在の暗号化アルバムを差分コピーします。\n"
+                                + mirrorRoot
+                                + "\n\n"
+                                + "サイズまたは更新日時が異なるファイルだけ上書きします。");
+        msg.setWrapText(true);
+        msg.setMaxWidth(480);
+        VBox box = new VBox(10, msg, deleteOrphans);
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+        confirm.initOwner(stage);
+        confirm.setTitle("バックアップと同期");
+        confirm.setHeaderText("同期の実行");
+        confirm.getDialogPane().setContent(box);
+        confirm.getButtonTypes().setAll(ButtonType.OK, ButtonType.CANCEL);
+        Optional<ButtonType> choice = confirm.showAndWait();
+        if (choice.isEmpty() || choice.get() != ButtonType.OK) {
+            return;
+        }
+        boolean doDelete = deleteOrphans.isSelected();
+        host.setMainWindowBusy.accept(MainWindowBusyState.busy("バックアップと同期を準備…"));
+        CompletableFuture.runAsync(
+                        () -> {
+                            try {
+                                syncVaultMirrorContents(
+                                        vaultRoot,
+                                        mirrorRoot,
+                                        doDelete,
+                                        progress ->
+                                                Platform.runLater(
+                                                        () ->
+                                                                host.setMainWindowBusy.accept(
+                                                                        MainWindowBusyState.busy(
+                                                                                formatCopyProgressMessage(
+                                                                                        "バックアップ同期",
+                                                                                        progress),
+                                                                                progress.copiedFiles(),
+                                                                                progress.totalFiles()))));
+                            } catch (IOException e) {
+                                throw new CompletionException(e);
+                            }
+                        },
+                        MIGRATION_EXECUTOR)
+                .whenComplete(
+                        (unused, err) ->
+                                Platform.runLater(
+                                        () -> {
+                                            host.setMainWindowBusy.accept(MainWindowBusyState.idle());
+                                            if (err != null) {
+                                                Throwable t = unwrapAsync(err);
+                                                GazoFx.showError(
+                                                        "バックアップと同期",
+                                                        t.getMessage() == null ? "" : t.getMessage());
+                                                return;
+                                            }
+                                            GazoFx.showWarn("バックアップと同期", "完了しました:\n" + mirrorRoot);
+                                        }));
+    }
+
+    /** アルバムルートとミラー先が同じツリー内に入れ子になっている場合は true（登録・同期とも拒否）。 */
+    static boolean isUnsafePhysicalBackupMirrorPair(Path vaultRoot, Path mirrorRoot) {
+        Path v = vaultRoot.toAbsolutePath().normalize();
+        Path m = mirrorRoot.toAbsolutePath().normalize();
+        if (v.equals(m)) {
+            return true;
+        }
+        return m.startsWith(v) || v.startsWith(m);
+    }
+
+    private static String mirrorRelativeKey(Path root, Path file) {
+        return root.relativize(file).toString().replace('\\', '/');
+    }
+
+    /**
+     * 暗号化ツリーをミラーへ反映する。{@code deleteOrphansNotInVault} が true のとき、ミラーにだけある通常ファイルを削除し、空ディレクトリを掃除する。
+     */
+    static void syncVaultMirrorContents(
+            Path sourceRoot,
+            Path mirrorRoot,
+            boolean deleteOrphansNotInVault,
+            Consumer<GazoVaultService.CopyProgress> onProgress)
+            throws IOException {
+        Path src = sourceRoot.toAbsolutePath().normalize();
+        Path mir = mirrorRoot.toAbsolutePath().normalize();
+        Files.createDirectories(mir);
+        List<Path> sourceFiles;
+        try (Stream<Path> stream = Files.walk(src)) {
+            sourceFiles =
+                    stream.filter(Files::isRegularFile)
+                            .filter(p -> !p.equals(src))
+                            .toList();
+        }
+        Set<String> sourceRels = new HashSet<>();
+        for (Path p : sourceFiles) {
+            sourceRels.add(mirrorRelativeKey(src, p));
+        }
+        int totalWork = sourceFiles.size();
+        List<Path> orphanDeletes = new ArrayList<>();
+        if (deleteOrphansNotInVault) {
+            try (Stream<Path> stream = Files.walk(mir)) {
+                for (Path mf : stream.toList()) {
+                    if (!Files.isRegularFile(mf) || mf.equals(mir)) {
+                        continue;
+                    }
+                    String rel = mirrorRelativeKey(mir, mf);
+                    if (!sourceRels.contains(rel)) {
+                        orphanDeletes.add(mf);
+                    }
+                }
+            }
+            totalWork += orphanDeletes.size();
+        }
+        int total = Math.max(1, totalWork);
+        int done = 0;
+        if (onProgress != null) {
+            onProgress.accept(new GazoVaultService.CopyProgress(0, total, ""));
+        }
+        for (Path sourceFile : sourceFiles) {
+            String rel = mirrorRelativeKey(src, sourceFile);
+            Path dest = mir.resolve(rel);
+            boolean copy =
+                    !Files.exists(dest)
+                            || !Files.isRegularFile(dest)
+                            || Files.size(sourceFile) != Files.size(dest)
+                            || !Files.getLastModifiedTime(sourceFile)
+                                    .equals(Files.getLastModifiedTime(dest));
+            if (copy) {
+                Path parent = dest.getParent();
+                if (parent != null) {
+                    Files.createDirectories(parent);
+                }
+                Files.copy(sourceFile, dest, StandardCopyOption.REPLACE_EXISTING);
+            }
+            done++;
+            if (onProgress != null) {
+                onProgress.accept(new GazoVaultService.CopyProgress(done, total, rel));
+            }
+        }
+        if (deleteOrphansNotInVault) {
+            for (Path mf : orphanDeletes) {
+                String delRel = mirrorRelativeKey(mir, mf);
+                Files.deleteIfExists(mf);
+                done++;
+                if (onProgress != null) {
+                    onProgress.accept(new GazoVaultService.CopyProgress(done, total, "削除 " + delRel));
+                }
+            }
+            try (Stream<Path> stream = Files.walk(mir)) {
+                for (Path p : stream.sorted(Comparator.reverseOrder()).toList()) {
+                    if (p.equals(mir)) {
+                        continue;
+                    }
+                    if (Files.isDirectory(p)) {
+                        try (Stream<Path> inner = Files.list(p)) {
+                            if (inner.findAny().isEmpty()) {
+                                Files.deleteIfExists(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     public void changeVaultPath(Stage stage) {

@@ -29,6 +29,9 @@ public final class GazoMenuBarFactory {
             Runnable onRestoreDeletedImages,
             Runnable onChangeVault,
             Runnable onBackupVaultPhysically,
+            Runnable onRegisterPhysicalBackupMirror,
+            Runnable onSyncPhysicalBackupMirror,
+            Runnable onClearPhysicalBackupMirrorRegistration,
             Runnable onConflictThresholdSettings,
             Runnable onMenuActionsShowing) {
         MenuItem addMenu = new MenuItem("画像を追加…");
@@ -51,6 +54,12 @@ public final class GazoMenuBarFactory {
         changeVaultMenu.setOnAction(e -> onChangeVault.run());
         MenuItem backupVaultPhysicalMenu = new MenuItem("アルバムを物理バックアップ…");
         backupVaultPhysicalMenu.setOnAction(e -> onBackupVaultPhysically.run());
+        MenuItem registerBackupMirrorMenu = new MenuItem("物理バックアップ先を登録…");
+        registerBackupMirrorMenu.setOnAction(e -> onRegisterPhysicalBackupMirror.run());
+        MenuItem syncBackupMirrorMenu = new MenuItem("バックアップと同期…");
+        syncBackupMirrorMenu.setOnAction(e -> onSyncPhysicalBackupMirror.run());
+        MenuItem clearBackupMirrorMenu = new MenuItem("物理バックアップ先の登録を解除…");
+        clearBackupMirrorMenu.setOnAction(e -> onClearPhysicalBackupMirrorRegistration.run());
         MenuItem conflictThresholdMenu = new MenuItem("競合比較しきい値設定…");
         conflictThresholdMenu.setOnAction(e -> onConflictThresholdSettings.run());
         MenuItem exitMenu = new MenuItem("終了");
@@ -67,6 +76,9 @@ public final class GazoMenuBarFactory {
                         new SeparatorMenuItem(),
                         changeVaultMenu,
                         backupVaultPhysicalMenu,
+                        registerBackupMirrorMenu,
+                        syncBackupMirrorMenu,
+                        clearBackupMirrorMenu,
                         conflictThresholdMenu,
                         new SeparatorMenuItem(),
                         exitMenu);
