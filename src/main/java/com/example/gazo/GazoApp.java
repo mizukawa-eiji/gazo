@@ -2,6 +2,7 @@ package com.example.gazo;
 
 import com.example.gazo.cli.CliImport;
 import com.example.gazo.vault.GazoVaultService;
+import com.example.gazo.vault.WebDavSyncProgress;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -34,6 +35,7 @@ import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.OverrunStyle;
 import javafx.scene.control.PasswordField;
+import javafx.scene.control.ProgressBar;
 import javafx.scene.control.RadioButton;
 import javafx.scene.control.ToggleGroup;
 import javafx.scene.Group;
@@ -75,11 +77,11 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -99,6 +101,7 @@ public final class GazoApp extends Application {
     /** メインウィンドウに重ねる処理中オーバーレイ（サムネイル再作成など） */
     private StackPane appBusyPane;
     private Label appBusyMessageLabel;
+    private ProgressBar appBusyProgressBar;
     private FlowPane gallery;
     /** 仮想スクロール用。上・下の余白で全体スクロール長を確保する。 */
     private Region galleryVirtualTopSpacer;
@@ -129,6 +132,11 @@ public final class GazoApp extends Application {
     });
     private Label vaultPathLabel;
     private Label syncStatusLabel;
+    /**
+     * WebDAV 同期の直近の completed 最大値。競合解決後に sync が先頭から走り直すと completed が小さく戻るため、
+     * その間はプログレスバーを不定表示にして「1 からやり直した」ように見えないようにする。
+     */
+    private int webDavSyncCompletedHighWater;
     /** インポート中のみファイル名を表示（通常は空） */
     private Label importStatusLabel;
     /** 画像タブツールバー: フィルター後の表示数と Vault 内の画像総数 */
@@ -165,6 +173,13 @@ public final class GazoApp extends Application {
 
     @Override
     public void start(Stage stage) {
+        try {
+            WebDavCacheLifecycle.onStartupBeforeVaultOpen();
+        } catch (IOException e) {
+            // キャッシュ掃除に失敗しても起動は続行
+        }
+        Runtime.getRuntime().addShutdownHook(new Thread(WebDavCacheLifecycle::onJvmShutdownRemoveMarker));
+        GazoVaultService.setWebDavProgressInstaller(this::configureWebDavSyncProgressForWebDav);
         vaultUnlock.prepareStageShellBeforeVaultUnlock(stage);
         VaultConnection initialConnection = VaultPathStore.loadInitialVaultConnection();
         requestAndOpenInitialVault(stage, initialConnection);
@@ -239,15 +254,72 @@ public final class GazoApp extends Application {
                         // 接続先切替をキャンセルした場合は、元の接続先の入力へ戻す。
                         requestAndOpenInitialVault(stage, initialRequest.connection());
                     }
-                });
+                },
+                null);
     }
 
-    private void adoptUnlockedVault(GazoVaultService newVault) throws Exception {
-        if (vault != null) {
-            vault.close();
+    private CompletableFuture<Void> adoptUnlockedVault(GazoVaultService newVault) {
+        CompletableFuture<Void> out = new CompletableFuture<>();
+        Platform.runLater(
+                () -> {
+                    try {
+                        if (vault != null) {
+                            vault.setWebDavSyncProgressListener(null);
+                            vault.close();
+                        }
+                        vault = newVault;
+                        configureWebDavSyncProgressForWebDav(newVault);
+                        reloadCanvasSelectionFromVault("default");
+                        out.complete(null);
+                    } catch (Exception e) {
+                        out.completeExceptionally(e);
+                    }
+                });
+        return out;
+    }
+
+    private void configureWebDavSyncProgressForWebDav(GazoVaultService v) {
+        webDavSyncCompletedHighWater = 0;
+        v.setWebDavSyncProgressListener(
+                p ->
+                        Platform.runLater(
+                                () -> {
+                                    applyWebDavSyncProgress(p);
+                                }));
+    }
+
+    private void applyWebDavSyncProgress(WebDavSyncProgress p) {
+        if ("同期完了".equals(p.phase())) {
+            webDavSyncCompletedHighWater = 0;
+            applyMainWindowBusyState(MainWindowBusyState.idle());
+            updateVaultPathLabel();
+            return;
         }
-        vault = newVault;
-        reloadCanvasSelectionFromVault("default");
+        if (syncStatusLabel != null && p.total() > 0) {
+            String tail = p.path() == null || p.path().isEmpty() ? "" : " · " + p.path();
+            syncStatusLabel.setText(p.phase() + " " + p.completed() + "/" + p.total() + tail);
+        }
+        int minForOverlay = 8;
+        boolean resyncAfterConflict =
+                p.total() >= minForOverlay
+                        && webDavSyncCompletedHighWater >= 3
+                        && p.completed() < webDavSyncCompletedHighWater;
+        if (p.total() >= minForOverlay) {
+            String tail = p.path() == null || p.path().isEmpty() ? "" : " · " + p.path();
+            if (resyncAfterConflict) {
+                applyMainWindowBusyState(
+                        MainWindowBusyState.busy(
+                                "WebDAV 再同期中（競合解決後） " + p.phase() + " " + p.completed() + "/" + p.total() + tail,
+                                ProgressBar.INDETERMINATE_PROGRESS));
+            } else {
+                applyMainWindowBusyState(
+                        MainWindowBusyState.busy(
+                                "WebDAV " + p.phase() + " " + p.completed() + "/" + p.total() + tail,
+                                p.completed(),
+                                p.total()));
+            }
+        }
+        webDavSyncCompletedHighWater = Math.max(webDavSyncCompletedHighWater, p.completed());
     }
 
     private void continueApplicationAfterVaultOpened(Stage stage) {
@@ -387,7 +459,7 @@ public final class GazoApp extends Application {
                                 },
                                 this::setImportStatusLabel,
                                 this::clearImportStatusLabel,
-                                this::setMainWindowBusy,
+                                this::applyMainWindowBusyState,
                                 this::refreshGallery));
         GazoMenuBarFactory.Result menus =
                 GazoMenuBarFactory.create(
@@ -400,6 +472,7 @@ public final class GazoApp extends Application {
                         () -> deleteCheckedImagesFromVault(stage),
                         () -> vaultActions.restoreRecentlyDeletedImages(stage),
                         () -> vaultActions.changeVaultPath(stage),
+                        () -> vaultActions.backupVaultPhysically(stage),
                         GazoFx::showConflictThresholdSettingsDialog,
                         this::updateGalleryListSelectionDependentControls);
         menuGalleryTagBulkAdd = menus.menuGalleryTagBulkAdd();
@@ -558,7 +631,12 @@ public final class GazoApp extends Application {
         appBusyHeadline.setStyle("-fx-font-size: 15px; -fx-font-weight: bold;");
         appBusyMessageLabel = new Label("処理中…");
         appBusyMessageLabel.setStyle("-fx-font-size: 13px;");
-        VBox appBusyCenter = new VBox(8, appBusyHeadline, appBusyMessageLabel);
+        appBusyProgressBar = new ProgressBar(0);
+        appBusyProgressBar.setPrefWidth(360);
+        appBusyProgressBar.setMaxWidth(360);
+        appBusyProgressBar.setVisible(false);
+        appBusyProgressBar.setManaged(false);
+        VBox appBusyCenter = new VBox(8, appBusyHeadline, appBusyMessageLabel, appBusyProgressBar);
         appBusyCenter.setAlignment(Pos.CENTER);
         appBusyPane.getChildren().addAll(appBusyBg, appBusyCenter);
         appBusyPane.setVisible(false);
@@ -668,13 +746,27 @@ public final class GazoApp extends Application {
         }
     }
 
-    private void setMainWindowBusy(boolean busy, String message) {
+    private void applyMainWindowBusyState(MainWindowBusyState state) {
         if (appBusyMessageLabel != null) {
-            appBusyMessageLabel.setText(message != null && !message.isBlank() ? message : "処理中…");
+            appBusyMessageLabel.setText(
+                    state.busy() && state.message() != null && !state.message().isBlank()
+                            ? state.message()
+                            : "処理中…");
+        }
+        if (appBusyProgressBar != null) {
+            boolean showBar = state.busy() && !Double.isNaN(state.progressFraction());
+            appBusyProgressBar.setVisible(showBar);
+            appBusyProgressBar.setManaged(showBar);
+            if (showBar) {
+                appBusyProgressBar.setProgress(state.progressFraction());
+            } else {
+                // 不定表示から抜ける・次回の determinate 表示のため
+                appBusyProgressBar.setProgress(0);
+            }
         }
         if (appBusyPane != null) {
-            appBusyPane.setVisible(busy);
-            appBusyPane.setManaged(busy);
+            appBusyPane.setVisible(state.busy());
+            appBusyPane.setManaged(state.busy());
         }
     }
 

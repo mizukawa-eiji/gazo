@@ -76,6 +76,16 @@ public final class GazoVaultService implements AutoCloseable {
     private CryptoFileSystem cryptoFileSystem;
     private boolean storagePrepared;
 
+    /**
+     * アプリが {@link com.example.gazo.GazoApp#start} で登録する。新規 {@link GazoVaultService} 生成時に
+     * WebDAV なら進捗リスナーを付け、初回解錠のダウンロードからプログレスバーが効く。
+     */
+    private static volatile Consumer<GazoVaultService> webDavProgressInstaller;
+
+    public static void setWebDavProgressInstaller(Consumer<GazoVaultService> installer) {
+        webDavProgressInstaller = installer;
+    }
+
     public GazoVaultService(Path vaultPath) {
         this(new LocalFsVaultStorage(vaultPath));
     }
@@ -89,6 +99,10 @@ public final class GazoVaultService implements AutoCloseable {
         this.vaultPath = storage.localVaultPath();
         this.vaultDisplayLocation = storage.displayLocation();
         this.masterkeyFileAccess = new MasterkeyFileAccess(new byte[0], secureRandom);
+        Consumer<GazoVaultService> hook = webDavProgressInstaller;
+        if (hook != null && storage.isRemote()) {
+            hook.accept(this);
+        }
     }
 
     public Path getVaultPath() {
@@ -105,6 +119,42 @@ public final class GazoVaultService implements AutoCloseable {
 
     public String syncStatusSummary() {
         return storage.syncStatusSummary();
+    }
+
+    /** WebDAV 等へ保留中の変更を書き出す（移行完了時など）。 */
+    public void flushStorageToRemote() throws IOException {
+        flushStorageChanges();
+    }
+
+    public void clearRemoteSyncMetadataIfPresent() throws IOException {
+        if (storage instanceof WebDavVaultStorage w) {
+            w.clearSyncMetadataFile();
+        }
+    }
+
+    /**
+     * WebDAV の Vault ルート配下を空にする（ルートのコレクションは残す）。
+     * 物理コピー移行で、移行先の初回解錠がリモートに作った {@code masterkey.cryptomator} 等が残ると、
+     * 移行元からコピーしたファイルと内容が食い違い毎回同期競合になるため、ミラーへコピーする前に呼ぶ。
+     */
+    public void clearRemoteVaultTreeForPhysicalMigration() throws IOException {
+        if (storage instanceof WebDavVaultStorage w) {
+            w.deleteAllRemoteVaultContents();
+        }
+    }
+
+    public void setPhysicalMirrorSeedPendingForNextOpen(boolean pending) {
+        if (storage instanceof WebDavVaultStorage w) {
+            w.setPhysicalMirrorSeedPending(pending);
+        }
+    }
+
+    /** WebDAV ルート配下に 1 ファイルでもあるか（物理移行先が空か）。 */
+    public boolean webDavRemoteHasAnyEncryptedFile() throws IOException {
+        if (storage instanceof WebDavVaultStorage w) {
+            return w.remoteTreeHasAnyFile();
+        }
+        return false;
     }
 
     public boolean vaultExists() {
@@ -363,6 +413,25 @@ public final class GazoVaultService implements AutoCloseable {
         flushStorageChanges();
     }
 
+    /**
+     * 別の解錠済み Vault の平文ルートと同じ構成に、この Vault の平文ルートを置き換える。
+     * 一時スナップショットを作らない単純コピー移行用（移行元はこの呼び出し中も開いたまま）。
+     */
+    public void replaceAllContentFromUnlockedPeer(GazoVaultService sourceVault, Consumer<CopyProgress> onProgress)
+            throws IOException {
+        Objects.requireNonNull(sourceVault, "sourceVault");
+        sourceVault.ensureUnlocked();
+        ensureUnlocked();
+        Path sourceRoot = sourceVault.cleartextRoot();
+        if (!Files.isDirectory(sourceRoot)) {
+            throw new IOException("移行元の平文ルートが見つかりません: " + sourceRoot);
+        }
+        Path destinationRoot = cleartextRoot();
+        clearDirectoryContents(destinationRoot);
+        copyDirectoryContents(sourceRoot, destinationRoot, onProgress);
+        flushStorageChanges();
+    }
+
     private Path resolveUniqueVideoPath(String originalFileName) throws IOException {
         Path dir = videosDirectory();
         String baseName = originalFileName;
@@ -414,8 +483,8 @@ public final class GazoVaultService implements AutoCloseable {
                 if (source.equals(sourceRoot)) {
                     continue;
                 }
-                Path relative = sourceRoot.relativize(source);
-                Path target = destinationRoot.resolve(relative);
+                String rel = sourceRoot.relativize(source).toString().replace('\\', '/');
+                Path target = destinationRoot.resolve(rel);
                 if (Files.isDirectory(source)) {
                     Files.createDirectories(target);
                 } else if (Files.isRegularFile(source)) {
@@ -426,7 +495,6 @@ public final class GazoVaultService implements AutoCloseable {
                     Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
                     copied++;
                     if (onProgress != null) {
-                        String rel = relative.toString().replace('\\', '/');
                         onProgress.accept(new CopyProgress(copied, totalFiles, rel));
                     }
                 }
@@ -1436,15 +1504,47 @@ public final class GazoVaultService implements AutoCloseable {
         }
     }
 
+    /**
+     * 次の {@link #unlock} で {@link VaultStorage#prepareForOpen()} を再度実行する。
+     * 同一インスタンスで初回解錠済みのとき {@code storagePrepared} が true のままだと prepare がスキップされ、
+     * 物理コピー後にミラー内容や同期メタが更新されても古い前提のまま flush され、WebDAV で誤競合になることがある。
+     */
+    public void invalidateStoragePreparedForNextUnlock() {
+        storagePrepared = false;
+    }
+
     private void prepareStorageIfNeeded() throws IOException {
         if (!storagePrepared) {
-            storage.prepareForOpen();
-            storagePrepared = true;
+            try {
+                storage.prepareForOpen();
+                storagePrepared = true;
+            } finally {
+                notifySyncUiCompleteIfWebDav();
+            }
+        }
+    }
+
+    /**
+     * WebDAV 同期の進捗（初回ダウンロード・flush 時のアップロード等）を UI へ通知する。
+     * ローカル Vault では無視される。
+     */
+    public void setWebDavSyncProgressListener(Consumer<WebDavSyncProgress> listener) {
+        if (storage instanceof WebDavVaultStorage w) {
+            w.setSyncProgressListener(listener);
+        }
+    }
+
+    private void notifySyncUiCompleteIfWebDav() {
+        if (storage instanceof WebDavVaultStorage w) {
+            w.notifySyncUiComplete();
         }
     }
 
     private void flushStorageChanges() throws IOException {
-        if (storagePrepared) {
+        if (!storagePrepared) {
+            return;
+        }
+        try {
             int attempts = 0;
             while (true) {
                 try {
@@ -1465,6 +1565,8 @@ public final class GazoVaultService implements AutoCloseable {
                     }
                 }
             }
+        } finally {
+            notifySyncUiCompleteIfWebDav();
         }
     }
 }

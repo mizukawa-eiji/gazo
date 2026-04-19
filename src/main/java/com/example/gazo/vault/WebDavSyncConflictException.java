@@ -13,6 +13,10 @@ public final class WebDavSyncConflictException extends IOException {
     private final byte[] remoteBytes;
     private final String remoteEtag;
     private final Instant remoteLastModified;
+    /** ローカルミラー上の最終更新（取得できなければ null） */
+    private final Instant localLastModified;
+    /** PROPFIND で得たリモートの Content-Length（ダウンロード失敗時の表示用）。不明は -1 */
+    private final long remoteListedContentLength;
 
     public WebDavSyncConflictException(
             String relativePath,
@@ -20,6 +24,8 @@ public final class WebDavSyncConflictException extends IOException {
             byte[] remoteBytes,
             String remoteEtag,
             Instant remoteLastModified,
+            Instant localLastModified,
+            long remoteListedContentLength,
             String message) {
         super(message);
         this.relativePath = relativePath;
@@ -27,6 +33,8 @@ public final class WebDavSyncConflictException extends IOException {
         this.remoteBytes = remoteBytes == null ? new byte[0] : remoteBytes.clone();
         this.remoteEtag = remoteEtag;
         this.remoteLastModified = remoteLastModified;
+        this.localLastModified = localLastModified;
+        this.remoteListedContentLength = remoteListedContentLength;
     }
 
     public String relativePath() {
@@ -47,6 +55,15 @@ public final class WebDavSyncConflictException extends IOException {
 
     public Instant remoteLastModified() {
         return remoteLastModified;
+    }
+
+    public Instant localLastModified() {
+        return localLastModified;
+    }
+
+    /** PROPFIND の getcontentlength。{@code -1} は不明。 */
+    public long remoteListedContentLength() {
+        return remoteListedContentLength;
     }
 
     public boolean isTextLike() {

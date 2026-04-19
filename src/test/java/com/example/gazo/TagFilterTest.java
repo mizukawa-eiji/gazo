@@ -29,4 +29,11 @@ class TagFilterTest {
         assertTrue(TagFilter.matches(active, Set.of("a", "b", "c")));
         assertFalse(TagFilter.matches(active, Set.of("a")));
     }
+
+    @Test
+    void matches_untaggedPlusRequiredTags_emptyFileTagsFalse() {
+        Set<String> active = new LinkedHashSet<>(Set.of(TagFilter.UNTAGGED_SENTINEL, "a"));
+        assertFalse(TagFilter.matches(active, Set.of()));
+        assertFalse(TagFilter.matches(active, Set.of("a")));
+    }
 }

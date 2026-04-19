@@ -10,6 +10,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class UserTagsTest {
 
     @Test
+    void parseCommaSeparated_nullYieldsEmpty() {
+        assertTrue(UserTags.parseCommaSeparated(null).isEmpty());
+    }
+
+    @Test
     void parseCommaSeparated_trimsAndLowercases() {
         assertEquals(Set.of("a", "b"), UserTags.parseCommaSeparated(" A , b "));
     }

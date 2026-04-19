@@ -21,6 +21,8 @@ dependencies {
     implementation('commons-io:commons-io:2.16.1')
     runtimeOnly('org.slf4j:slf4j-simple:2.0.9')
     testImplementation('org.junit.jupiter:junit-jupiter:5.10.3')
+    // 5.23+ の Byte Buddy が新しめの JDK でのテスト実行に必要（古い Mockito は Inline 生成で失敗することがある）
+    testImplementation('org.mockito:mockito-junit-jupiter:5.23.0')
     // Gradle 8+ でテスト実行時に Platform ランチャーが足りない場合があるため明示する
     testRuntimeOnly('org.junit.platform:junit-platform-launcher:1.10.3')
 }

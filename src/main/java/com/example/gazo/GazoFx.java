@@ -8,11 +8,13 @@ import javafx.scene.Node;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.Dialog;
+import javafx.scene.control.PasswordField;
 import javafx.scene.control.Label;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Spinner;
 import javafx.scene.control.SpinnerValueFactory;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.image.PixelReader;
 import javafx.scene.layout.HBox;
@@ -21,13 +23,16 @@ import javafx.scene.layout.VBox;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.stage.Stage;
+import javafx.stage.Window;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -155,6 +160,56 @@ public final class GazoFx {
         });
     }
 
+    /**
+     * Vault パスワードを 1 行入力する。戻り値の {@code char[]} は呼び出し側で使用後にゼロ埋めして消去すること。
+     */
+    public static Optional<char[]> promptVaultPassphrase(Stage owner, String title, String header, String message) {
+        if (!Platform.isFxApplicationThread()) {
+            AtomicReference<Optional<char[]>> out = new AtomicReference<>(Optional.empty());
+            CountDownLatch latch = new CountDownLatch(1);
+            Platform.runLater(
+                    () -> {
+                        try {
+                            out.set(promptVaultPassphraseOnFx(owner, title, header, message));
+                        } finally {
+                            latch.countDown();
+                        }
+                    });
+            try {
+                latch.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Optional.empty();
+            }
+            return out.get();
+        }
+        return promptVaultPassphraseOnFx(owner, title, header, message);
+    }
+
+    private static Optional<char[]> promptVaultPassphraseOnFx(
+            Stage owner, String title, String header, String message) {
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(owner);
+        dialog.setTitle(title);
+        dialog.setHeaderText(header);
+        bindAppIconToDialog(dialog);
+        PasswordField field = new PasswordField();
+        Label msg = new Label(message);
+        msg.setWrapText(true);
+        VBox content = new VBox(8, msg, field);
+        content.setPadding(new Insets(12));
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        dialog.setOnShown(e -> field.requestFocus());
+        Optional<ButtonType> r = dialog.showAndWait();
+        if (r.isEmpty() || r.get() != ButtonType.OK) {
+            return Optional.empty();
+        }
+        char[] pwd = field.getText().toCharArray();
+        field.clear();
+        return pwd.length == 0 ? Optional.empty() : Optional.of(pwd);
+    }
+
     public static WebDavConflictResolution showWebDavConflictDialog(WebDavSyncConflictException conflict) {
         if (!Platform.isFxApplicationThread()) {
             AtomicReference<WebDavConflictResolution> out = new AtomicReference<>(WebDavConflictResolution.SAVE_AS_CONFLICT_COPY);
@@ -189,15 +244,34 @@ public final class GazoFx {
 
         VBox root = new VBox(10);
         root.setPadding(new Insets(10));
+        root.setMaxWidth(560);
         Label header = new Label("競合ファイル: " + conflict.relativePath());
+        header.setWrapText(true);
+        header.setMaxWidth(560);
         root.getChildren().add(header);
         Label hint = new Label("ローカルとリモートの両方で更新が検出されました。解決方法を選択してください。");
         hint.setWrapText(true);
+        hint.setMaxWidth(560);
         root.getChildren().add(hint);
+        String cryptHint = cryptomatorDirC9rHintText(conflict.relativePath());
+        if (!cryptHint.isBlank()) {
+            Label crypt = new Label(cryptHint);
+            crypt.setWrapText(true);
+            crypt.setMaxWidth(560);
+            crypt.setStyle("-fx-text-fill: #5c564a;");
+            root.getChildren().add(crypt);
+        }
+        Label metaSummary = buildWebDavConflictMetaSummary(conflict);
+        metaSummary.setStyle("-fx-text-fill: #33312d;");
+        metaSummary.setWrapText(true);
+        metaSummary.setMaxWidth(560);
+        root.getChildren().add(metaSummary);
+
         ImageInfo localImage = decodeImage(conflict.localBytes());
         ImageInfo remoteImage = decodeImage(conflict.remoteBytes());
-        boolean imageComparable = localImage != null && remoteImage != null;
-        if (imageComparable) {
+        boolean hasImagePreview = localImage != null || remoteImage != null;
+
+        if (hasImagePreview) {
             VaultPathStore.ConflictDHashThresholds thresholds = VaultPathStore.loadConflictDHashThresholds();
             Spinner<Integer> sameSpinner = new Spinner<>();
             sameSpinner.setValueFactory(new SpinnerValueFactory.IntegerSpinnerValueFactory(0, 63, thresholds.sameMax()));
@@ -218,67 +292,72 @@ public final class GazoFx {
             HBox thresholdRow = new HBox(8, new Label("しきい値"), new Label("ほぼ同一<="), sameSpinner, new Label("近い<="), nearSpinner);
             root.getChildren().add(thresholdRow);
 
-            VBox localPane = buildImagePane("ローカル", localImage, conflict.localBytes().length);
+            VBox localPane =
+                    localImage != null
+                            ? buildImagePane(
+                                    "ローカル",
+                                    localImage,
+                                    conflict.localBytes().length,
+                                    formatConflictInstant(conflict.localLastModified()),
+                                    null)
+                            : buildNoImagePreviewPane(
+                                    "ローカル", conflict.localBytes().length, conflict.localLastModified());
             VBox remotePane =
-                    buildImagePane(
-                            "リモート",
-                            remoteImage,
-                            conflict.remoteBytes().length,
-                            conflict.remoteLastModified() == null
-                                    ? null
-                                    : DATE_TIME_FORMAT.format(conflict.remoteLastModified().atZone(ZoneId.systemDefault()).toLocalDateTime()),
-                            conflict.remoteEtag());
+                    remoteImage != null
+                            ? buildImagePane(
+                                    "リモート",
+                                    remoteImage,
+                                    effectiveRemoteByteLength(conflict),
+                                    conflict.remoteLastModified() == null
+                                            ? null
+                                            : DATE_TIME_FORMAT.format(
+                                                    conflict.remoteLastModified()
+                                                            .atZone(ZoneId.systemDefault())
+                                                            .toLocalDateTime()),
+                                    conflict.remoteEtag())
+                            : buildNoImagePreviewPane(
+                                    "リモート",
+                                    effectiveRemoteByteLength(conflict),
+                                    conflict.remoteLastModified());
             HBox compare = new HBox(8, localPane, remotePane);
             HBox.setHgrow(localPane, Priority.ALWAYS);
             HBox.setHgrow(remotePane, Priority.ALWAYS);
             compare.setMinHeight(360);
-            root.getChildren().add(compare);
-            Long localHash = localImage.dHash;
-            Long remoteHash = remoteImage.dHash;
+            ScrollPane scroll = new ScrollPane(compare);
+            scroll.setFitToWidth(true);
+            scroll.setPrefViewportHeight(380);
+            root.getChildren().add(scroll);
+
+            Long localHash = localImage == null ? null : localImage.dHash();
+            Long remoteHash = remoteImage == null ? null : remoteImage.dHash();
             if (localHash != null && remoteHash != null) {
                 int d = Long.bitCount(localHash ^ remoteHash);
                 Label dLabel = new Label();
-                Runnable updateDLabel = () -> {
-                    int sameMax = sameSpinner.getValue();
-                    int nearMax = nearSpinner.getValue();
-                    String level = d <= sameMax ? "ほぼ同一" : (d <= nearMax ? "近い" : "差分大");
-                    dLabel.setText("d値 (dHash距離): " + d + " / 64  (" + level + ")");
-                };
+                Runnable updateDLabel =
+                        () -> {
+                            int sameMax = sameSpinner.getValue();
+                            int nearMax = nearSpinner.getValue();
+                            String level = d <= sameMax ? "ほぼ同一" : (d <= nearMax ? "近い" : "差分大");
+                            dLabel.setText("d値 (dHash距離): " + d + " / 64  (" + level + ")");
+                        };
                 sameSpinner.valueProperty().addListener((obs, oldV, newV) -> updateDLabel.run());
                 nearSpinner.valueProperty().addListener((obs, oldV, newV) -> updateDLabel.run());
                 updateDLabel.run();
                 root.getChildren().add(dLabel);
-                dialog.setResultConverter(btn -> {
-                    VaultPathStore.saveConflictDHashThresholds(
-                            new VaultPathStore.ConflictDHashThresholds(sameSpinner.getValue(), nearSpinner.getValue()));
-                    if (btn == keepLocal) {
-                        return WebDavConflictResolution.KEEP_LOCAL;
-                    }
-                    if (btn == keepRemote) {
-                        return WebDavConflictResolution.KEEP_REMOTE;
-                    }
-                    if (btn == saveCopy) {
-                        return WebDavConflictResolution.SAVE_AS_CONFLICT_COPY;
-                    }
-                    return WebDavConflictResolution.CANCEL;
-                });
             } else {
-                root.getChildren().add(new Label("d値: 画像ハッシュを計算できませんでした。"));
-                dialog.setResultConverter(btn -> {
-                    VaultPathStore.saveConflictDHashThresholds(
-                            new VaultPathStore.ConflictDHashThresholds(sameSpinner.getValue(), nearSpinner.getValue()));
-                    if (btn == keepLocal) {
-                        return WebDavConflictResolution.KEEP_LOCAL;
-                    }
-                    if (btn == keepRemote) {
-                        return WebDavConflictResolution.KEEP_REMOTE;
-                    }
-                    if (btn == saveCopy) {
-                        return WebDavConflictResolution.SAVE_AS_CONFLICT_COPY;
-                    }
-                    return WebDavConflictResolution.CANCEL;
-                });
+                Label dNote =
+                        new Label(
+                                "d値は両方とも画像として読めたときだけ表示します。片側のみのときは目視で比較してください。");
+                dNote.setWrapText(true);
+                dNote.setMaxWidth(560);
+                root.getChildren().add(dNote);
             }
+            dialog.setResultConverter(
+                    btn -> {
+                        VaultPathStore.saveConflictDHashThresholds(
+                                new VaultPathStore.ConflictDHashThresholds(sameSpinner.getValue(), nearSpinner.getValue()));
+                        return webDavConflictButtonToResolution(btn, keepLocal, keepRemote, saveCopy);
+                    });
         } else if (conflict.isTextLike()) {
             TextArea local = new TextArea(conflict.localTextPreview());
             local.setEditable(false);
@@ -286,8 +365,20 @@ public final class GazoFx {
             TextArea remote = new TextArea(conflict.remoteTextPreview());
             remote.setEditable(false);
             remote.setWrapText(false);
-            VBox left = new VBox(4, new Label("ローカル"), local);
-            VBox right = new VBox(4, new Label("リモート"), remote);
+            VBox left =
+                    new VBox(
+                            4,
+                            new Label("ローカル"),
+                            new Label(metaLineForSide(conflict.localBytes().length, conflict.localLastModified())),
+                            local);
+            VBox right =
+                    new VBox(
+                            4,
+                            new Label("リモート"),
+                            new Label(
+                                    metaLineForSide(
+                                            effectiveRemoteByteLength(conflict), conflict.remoteLastModified())),
+                            remote);
             HBox.setHgrow(left, Priority.ALWAYS);
             HBox.setHgrow(right, Priority.ALWAYS);
             VBox.setVgrow(local, Priority.ALWAYS);
@@ -295,25 +386,109 @@ public final class GazoFx {
             HBox compare = new HBox(8, left, right);
             compare.setMinHeight(320);
             root.getChildren().add(compare);
+            dialog.setResultConverter(btn -> webDavConflictButtonToResolution(btn, keepLocal, keepRemote, saveCopy));
         } else {
-            root.getChildren().add(new Label("バイナリファイルのためテキスト差分は表示できません。"));
+            Label bin = new Label(
+                    "画像として表示できず、テキストでもないバイナリです。容量・日時で判断してください。");
+            bin.setWrapText(true);
+            bin.setMaxWidth(560);
+            root.getChildren().add(bin);
+            dialog.setResultConverter(btn -> webDavConflictButtonToResolution(btn, keepLocal, keepRemote, saveCopy));
         }
-        dialog.getDialogPane().setContent(root);
-        if (!imageComparable) {
-            dialog.setResultConverter(btn -> {
-                if (btn == keepLocal) {
-                    return WebDavConflictResolution.KEEP_LOCAL;
-                }
-                if (btn == keepRemote) {
-                    return WebDavConflictResolution.KEEP_REMOTE;
-                }
-                if (btn == saveCopy) {
-                    return WebDavConflictResolution.SAVE_AS_CONFLICT_COPY;
-                }
-                return WebDavConflictResolution.CANCEL;
-            });
-        }
+        ScrollPane scrollRoot = new ScrollPane(root);
+        scrollRoot.setFitToWidth(true);
+        scrollRoot.setPannable(true);
+        scrollRoot.setMinViewportHeight(220);
+        scrollRoot.setPrefViewportHeight(420);
+        scrollRoot.setMaxHeight(480);
+        dialog.getDialogPane().setContent(scrollRoot);
+        dialog.getDialogPane().setPrefWidth(600);
+        dialog.setOnShown(
+                e -> {
+                    Window w = dialog.getDialogPane().getScene().getWindow();
+                    if (w instanceof Stage st) {
+                        st.setResizable(true);
+                        st.setMinWidth(480);
+                        st.setMinHeight(360);
+                    }
+                });
         return dialog.showAndWait().orElse(WebDavConflictResolution.CANCEL);
+    }
+
+    /** Cryptomator の {@code dir.c9r} 向けの短い説明（ダイアログ内に収める）。 */
+    private static String cryptomatorDirC9rHintText(String relativePath) {
+        if (relativePath == null || relativePath.isBlank()) {
+            return "";
+        }
+        int slash = relativePath.lastIndexOf('/');
+        String name = slash >= 0 ? relativePath.substring(slash + 1) : relativePath;
+        if (!"dir.c9r".equals(name)) {
+            return "";
+        }
+        return "dir.c9r は Cryptomator のフォルダ ID（UUID）。親名の .c9r は拡張子ではなく暗号化フォルダ用です。"
+                + " 毎回出ることがあるのは、別端末・別アプリで同じ Vault を触るとまた食い違うためです（片側だけ使うと落ち着くことが多いです）。";
+    }
+
+    private static WebDavConflictResolution webDavConflictButtonToResolution(
+            ButtonType btn, ButtonType keepLocal, ButtonType keepRemote, ButtonType saveCopy) {
+        if (btn == keepLocal) {
+            return WebDavConflictResolution.KEEP_LOCAL;
+        }
+        if (btn == keepRemote) {
+            return WebDavConflictResolution.KEEP_REMOTE;
+        }
+        if (btn == saveCopy) {
+            return WebDavConflictResolution.SAVE_AS_CONFLICT_COPY;
+        }
+        return WebDavConflictResolution.CANCEL;
+    }
+
+    private static VBox buildNoImagePreviewPane(String title, long byteSize, Instant lastModified) {
+        Label titleLabel = new Label(title);
+        String detail =
+                byteSize <= 0
+                        ? "データがありません（取得失敗の可能性があります）。"
+                        : humanBytes(byteSize) + " — JavaFX でデコードできない形式か、破損している可能性があります。";
+        Label msg = new Label(detail);
+        msg.setWrapText(true);
+        Label when = new Label("更新: " + formatConflictInstant(lastModified));
+        return new VBox(6, titleLabel, msg, when);
+    }
+
+    private static Label buildWebDavConflictMetaSummary(WebDavSyncConflictException c) {
+        long localLen = c.localBytes().length;
+        long remoteLen = effectiveRemoteByteLength(c);
+        String localLine = "ローカル: " + humanBytes(localLen) + "・更新: " + formatConflictInstant(c.localLastModified());
+        String remoteNote =
+                c.remoteBytes().length == 0 && c.remoteListedContentLength() >= 0
+                        ? "（本文は未取得、サイズはサーバー一覧値）"
+                        : "";
+        String remoteLine =
+                "リモート: " + humanBytes(remoteLen) + remoteNote + "・更新: " + formatConflictInstant(c.remoteLastModified());
+        Label l = new Label(localLine + "\n" + remoteLine);
+        l.setWrapText(true);
+        return l;
+    }
+
+    private static long effectiveRemoteByteLength(WebDavSyncConflictException c) {
+        if (c.remoteBytes().length > 0) {
+            return c.remoteBytes().length;
+        }
+        if (c.remoteListedContentLength() >= 0) {
+            return c.remoteListedContentLength();
+        }
+        return 0;
+    }
+
+    private static String metaLineForSide(long byteLength, Instant lastModified) {
+        return humanBytes(byteLength) + "・更新: " + formatConflictInstant(lastModified);
+    }
+
+    private static String formatConflictInstant(Instant t) {
+        if (t == null) {
+            return "—";
+        }
+        return DATE_TIME_FORMAT.format(t.atZone(ZoneId.systemDefault()).toLocalDateTime());
     }
 
     private static VBox buildImagePane(String title, ImageInfo info, long byteSize) {
@@ -321,15 +496,15 @@ public final class GazoFx {
     }
 
     private static VBox buildImagePane(String title, ImageInfo info, long byteSize, String modifiedAt, String etag) {
-        ImageView view = new ImageView(info.image);
+        ImageView view = new ImageView(info.image());
         view.setFitWidth(360);
         view.setFitHeight(260);
         view.setPreserveRatio(true);
         view.setSmooth(true);
         Label titleLabel = new Label(title);
-        Label dim = new Label("解像度: " + info.width + " x " + info.height);
+        Label dim = new Label("解像度: " + info.width() + " x " + info.height());
         Label size = new Label("容量: " + humanBytes(byteSize));
-        double ratio = info.height <= 0 ? 0.0 : ((double) info.width / (double) info.height);
+        double ratio = info.height() <= 0 ? 0.0 : ((double) info.width() / (double) info.height());
         Label aspect = new Label("比率: " + String.format(Locale.ROOT, "%.3f", ratio));
         VBox box = new VBox(4, titleLabel, view, dim, size, aspect);
         if (modifiedAt != null) {

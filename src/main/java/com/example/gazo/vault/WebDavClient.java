@@ -24,6 +24,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 
@@ -473,7 +474,83 @@ final class WebDavClient {
         if (status == 200 || status == 202 || status == 204 || status == 404) {
             return;
         }
+        // SabreDAV / Nextcloud 等はコレクションや一括削除で HTTP 207 Multi-Status + XML を返すことがある。
+        if (status == 207) {
+            verifyDeleteMultiStatus(resp.body(), normalized);
+            return;
+        }
         throw new IOException("WebDAV DELETE failed: " + status + " path=" + normalized);
+    }
+
+    /**
+     * DELETE の 207 応答を解釈する。各 response の status が 2xx または 404（既に無い）なら成功。
+     */
+    private static void verifyDeleteMultiStatus(byte[] body, String path) throws IOException {
+        if (body == null || body.length == 0) {
+            return;
+        }
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            factory.setNamespaceAware(true);
+            Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(body));
+            NodeList responses = doc.getElementsByTagNameNS("DAV:", "response");
+            if (responses.getLength() == 0) {
+                return;
+            }
+            for (int i = 0; i < responses.getLength(); i++) {
+                Element response = (Element) responses.item(i);
+                String statusLine = findDavStatusLine(response);
+                if (statusLine == null || statusLine.isBlank()) {
+                    continue;
+                }
+                int code = parseHttpStatusCodeFromDavLine(statusLine);
+                if (code >= 200 && code < 300) {
+                    continue;
+                }
+                if (code == 404) {
+                    continue;
+                }
+                throw new IOException("WebDAV DELETE multistatus failure: " + statusLine + " path=" + path);
+            }
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Failed to parse WebDAV DELETE Multi-Status response", e);
+        }
+    }
+
+    private static String findDavStatusLine(Element response) {
+        String s = text(response, "DAV:", "status");
+        if (s != null && !s.isBlank()) {
+            return s;
+        }
+        NodeList propstats = response.getElementsByTagNameNS("DAV:", "propstat");
+        for (int i = 0; i < propstats.getLength(); i++) {
+            Element propstat = (Element) propstats.item(i);
+            s = text(propstat, "DAV:", "status");
+            if (s != null && !s.isBlank()) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    /** {@code HTTP/1.1 204 No Content} 形式の行からステータスコードを取り出す。 */
+    private static int parseHttpStatusCodeFromDavLine(String statusLine) {
+        if (statusLine == null) {
+            return -1;
+        }
+        String[] parts = statusLine.trim().split("\\s+");
+        for (int i = 0; i < parts.length - 1; i++) {
+            if (parts[i].startsWith("HTTP/")) {
+                try {
+                    return Integer.parseInt(parts[i + 1]);
+                } catch (NumberFormatException e) {
+                    return -1;
+                }
+            }
+        }
+        return -1;
     }
 
     /**
@@ -513,6 +590,46 @@ final class WebDavClient {
         return false;
     }
 
+    /**
+     * 大量同期直後など、サーバーが接続だけ切る・空応答で落とすことがある。数回だけ待って再送する。
+     */
+    private static boolean isTransientWebDavSendFailure(Throwable t) {
+        if (isConnectionClosedWithoutResponse(t)) {
+            return true;
+        }
+        for (Throwable x = t; x != null; x = x.getCause()) {
+            String m = x.getMessage();
+            if (m == null) {
+                continue;
+            }
+            String lower = m.toLowerCase(Locale.ROOT);
+            if (lower.contains("connection reset")) {
+                return true;
+            }
+            if (lower.contains("broken pipe")) {
+                return true;
+            }
+            if (lower.contains("connection timed out") || lower.contains("read timed out")) {
+                return true;
+            }
+            if (lower.contains("unexpected end of file")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static final int WEBDAV_SEND_MAX_ATTEMPTS = 5;
+
+    private static void sleepQuiet(long millis) throws IOException {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("WebDAV request interrupted", e);
+        }
+    }
+
     private HttpRequest.Builder baseRequest(String path) {
         return HttpRequest.newBuilder(absoluteUri(path))
                 .header("Authorization", authHeader)
@@ -520,12 +637,25 @@ final class WebDavClient {
     }
 
     private HttpResponse<byte[]> send(HttpRequest req) throws IOException {
-        try {
-            return httpClient.send(req, HttpResponse.BodyHandlers.ofByteArray());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("WebDAV request interrupted", e);
+        IOException lastIo = null;
+        for (int attempt = 0; attempt < WEBDAV_SEND_MAX_ATTEMPTS; attempt++) {
+            if (attempt > 0) {
+                sleepQuiet(Math.min(4000L, 200L * (1L << (attempt - 1))));
+            }
+            try {
+                return httpClient.send(req, HttpResponse.BodyHandlers.ofByteArray());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("WebDAV request interrupted", e);
+            } catch (IOException e) {
+                lastIo = e;
+                if (attempt < WEBDAV_SEND_MAX_ATTEMPTS - 1 && isTransientWebDavSendFailure(e)) {
+                    continue;
+                }
+                throw e;
+            }
         }
+        throw lastIo != null ? lastIo : new IOException("WebDAV send failed");
     }
 
     private URI absoluteUri(String path) {
@@ -708,6 +838,26 @@ final class WebDavClient {
             return null;
         }
         String t = etag.trim();
+        return t.isEmpty() ? null : t;
+    }
+
+    /**
+     * 同期状態と PROPFIND の ETag を比較するとき用。PUT 応答ヘッダと XML の表記差・弱タグ接頭辞を吸収する。
+     */
+    static String canonicalEtagForCompare(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        String t = raw.trim();
+        if (t.isEmpty()) {
+            return null;
+        }
+        if (t.regionMatches(true, 0, "W/", 0, 2)) {
+            t = t.substring(2).trim();
+        }
+        while (t.length() >= 2 && t.charAt(0) == '"' && t.charAt(t.length() - 1) == '"') {
+            t = t.substring(1, t.length() - 1).trim();
+        }
         return t.isEmpty() ? null : t;
     }
 

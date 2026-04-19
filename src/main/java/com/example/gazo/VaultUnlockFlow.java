@@ -23,8 +23,10 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /**
@@ -85,14 +87,14 @@ public final class VaultUnlockFlow {
      * 別スレッドではなくイベントスレッドから呼ぶ。解錠後に {@code adopt} で Vault をアプリへ取り込み、{@code done} で完了を通知する。
      */
     public void openVaultAsync(Stage stage, Path vaultDir, Consumer<Exception> done, VaultUnlockSuccess adopt) {
-        openVaultAsync(stage, VaultOpenRequest.local(VaultConnection.local(vaultDir)), done, adopt, null);
+        openVaultAsync(stage, VaultOpenRequest.local(VaultConnection.local(vaultDir)), done, adopt, null, null);
     }
 
     /**
      * 接続情報を含む Vault オープン。
      */
     public void openVaultAsync(Stage stage, VaultOpenRequest request, Consumer<Exception> done, VaultUnlockSuccess adopt) {
-        openVaultAsync(stage, request, done, adopt, null);
+        openVaultAsync(stage, request, done, adopt, null, null);
     }
 
     /**
@@ -104,6 +106,20 @@ public final class VaultUnlockFlow {
             Consumer<Exception> done,
             VaultUnlockSuccess adopt,
             Runnable onSwitchConnection) {
+        openVaultAsync(stage, request, done, adopt, onSwitchConnection, null);
+    }
+
+    /**
+     * 解錠に成功した直後の Vault パスワードを {@code vaultPassphraseCapture} に 1 回だけ入れる（物理コピー移行の再解錠用）。
+     * 呼び出し側で使用後に {@link Arrays#fill(char[], char)} で消去すること。
+     */
+    public void openVaultAsync(
+            Stage stage,
+            VaultOpenRequest request,
+            Consumer<Exception> done,
+            VaultUnlockSuccess adopt,
+            Runnable onSwitchConnection,
+            AtomicReference<char[]> vaultPassphraseCapture) {
         try {
             GazoVaultService newVault = new GazoVaultService(request.connection(), request.webDavPassword());
             unlockOrCreateInline(
@@ -112,9 +128,34 @@ public final class VaultUnlockFlow {
                     onSwitchConnection,
                     () -> {
                         try {
-                            adopt.adoptUnlockedVault(newVault);
-                            request.clearSecrets();
-                            done.accept(null);
+                            CompletableFuture<Void> pending = adopt.adoptUnlockedVault(newVault);
+                            if (pending == null) {
+                                request.clearSecrets();
+                                done.accept(null);
+                                return;
+                            }
+                            pending.whenComplete(
+                                    (unused, err) ->
+                                            Platform.runLater(
+                                                    () -> {
+                                                        if (err != null) {
+                                                            request.clearSecrets();
+                                                            clearCapturedPassphrase(vaultPassphraseCapture);
+                                                            Throwable t = unwrap(err);
+                                                            if (t instanceof CompletionException
+                                                                    && t.getCause() != null) {
+                                                                t = t.getCause();
+                                                            }
+                                                            if (t instanceof Exception) {
+                                                                done.accept((Exception) t);
+                                                            } else {
+                                                                done.accept(new Exception(t));
+                                                            }
+                                                        } else {
+                                                            request.clearSecrets();
+                                                            done.accept(null);
+                                                        }
+                                                    }));
                         } catch (Exception e) {
                             request.clearSecrets();
                             done.accept(e);
@@ -122,11 +163,24 @@ public final class VaultUnlockFlow {
                     },
                     () -> {
                         request.clearSecrets();
+                        clearCapturedPassphrase(vaultPassphraseCapture);
                         done.accept(new VaultUnlockCancelledException());
-                    });
+                    },
+                    vaultPassphraseCapture);
         } catch (Exception e) {
             request.clearSecrets();
+            clearCapturedPassphrase(vaultPassphraseCapture);
             done.accept(e);
+        }
+    }
+
+    private static void clearCapturedPassphrase(AtomicReference<char[]> vaultPassphraseCapture) {
+        if (vaultPassphraseCapture == null) {
+            return;
+        }
+        char[] p = vaultPassphraseCapture.getAndSet(null);
+        if (p != null) {
+            Arrays.fill(p, '\0');
         }
     }
 
@@ -315,7 +369,8 @@ public final class VaultUnlockFlow {
             GazoVaultService targetVault,
             Runnable onSwitchConnection,
             Runnable onUnlocked,
-            Runnable onCancelled) {
+            Runnable onCancelled,
+            AtomicReference<char[]> vaultPassphraseCapture) {
         showShellProgress("アルバムの状態を確認しています…（WebDAV は少し時間がかかることがあります）");
         CompletableFuture.supplyAsync(targetVault::vaultExists, VAULT_IO_EXECUTOR)
                 .whenComplete(
@@ -337,12 +392,24 @@ public final class VaultUnlockFlow {
                                                         stage,
                                                         pass ->
                                                                 runVaultCreateInBackground(
-                                                                        stage, targetVault, pass, onUnlocked, onCancelled),
+                                                                        stage,
+                                                                        targetVault,
+                                                                        pass,
+                                                                        onUnlocked,
+                                                                        onCancelled,
+                                                                        vaultPassphraseCapture),
                                                         onCancelled,
                                                         onSwitchConnection);
                                                 return;
                                             }
-                                            runUnlockLoop(stage, targetVault, null, onSwitchConnection, onUnlocked, onCancelled);
+                                            runUnlockLoop(
+                                                    stage,
+                                                    targetVault,
+                                                    null,
+                                                    onSwitchConnection,
+                                                    onUnlocked,
+                                                    onCancelled,
+                                                    vaultPassphraseCapture);
                                         }));
     }
 
@@ -351,7 +418,8 @@ public final class VaultUnlockFlow {
             GazoVaultService targetVault,
             char[] pass,
             Runnable onUnlocked,
-            Runnable onCancelled) {
+            Runnable onCancelled,
+            AtomicReference<char[]> vaultPassphraseCapture) {
         char[] copy = Arrays.copyOf(pass, pass.length);
         Arrays.fill(pass, '\0');
         showShellProgress("アルバムを作成しています…（WebDAV の場合は同期に時間がかかることがあります）");
@@ -359,6 +427,13 @@ public final class VaultUnlockFlow {
                         () -> {
                             try {
                                 targetVault.createVault(new String(copy));
+                                if (vaultPassphraseCapture != null) {
+                                    char[] prev = vaultPassphraseCapture.getAndSet(null);
+                                    if (prev != null) {
+                                        Arrays.fill(prev, '\0');
+                                    }
+                                    vaultPassphraseCapture.set(Arrays.copyOf(copy, copy.length));
+                                }
                             } catch (IOException | MasterkeyLoadingFailedException e) {
                                 throw new RuntimeException(e);
                             } finally {
@@ -404,11 +479,20 @@ public final class VaultUnlockFlow {
             String inlineError,
             Runnable onSwitchConnection,
             Runnable onUnlocked,
-            Runnable onCancelled) {
+            Runnable onCancelled,
+            AtomicReference<char[]> vaultPassphraseCapture) {
         showUnlockPasswordInline(
                 stage,
                 inlineError,
-                pass -> runVaultUnlockInBackground(stage, targetVault, pass, onSwitchConnection, onUnlocked, onCancelled),
+                pass ->
+                        runVaultUnlockInBackground(
+                                stage,
+                                targetVault,
+                                pass,
+                                onSwitchConnection,
+                                onUnlocked,
+                                onCancelled,
+                                vaultPassphraseCapture),
                 onCancelled,
                 onSwitchConnection);
     }
@@ -419,7 +503,8 @@ public final class VaultUnlockFlow {
             char[] pass,
             Runnable onSwitchConnection,
             Runnable onUnlocked,
-            Runnable onCancelled) {
+            Runnable onCancelled,
+            AtomicReference<char[]> vaultPassphraseCapture) {
         char[] copy = Arrays.copyOf(pass, pass.length);
         Arrays.fill(pass, '\0');
         showShellProgress("アルバムを解錠しています…");
@@ -427,6 +512,13 @@ public final class VaultUnlockFlow {
                         () -> {
                             try {
                                 targetVault.unlock(new String(copy));
+                                if (vaultPassphraseCapture != null) {
+                                    char[] prev = vaultPassphraseCapture.getAndSet(null);
+                                    if (prev != null) {
+                                        Arrays.fill(prev, '\0');
+                                    }
+                                    vaultPassphraseCapture.set(Arrays.copyOf(copy, copy.length));
+                                }
                             } catch (InvalidPassphraseException e) {
                                 throw new RuntimeException(e);
                             } catch (IOException | MasterkeyLoadingFailedException e) {
@@ -454,7 +546,8 @@ public final class VaultUnlockFlow {
                                                         "パスワードが正しくありません。",
                                                         onSwitchConnection,
                                                         onUnlocked,
-                                                        onCancelled);
+                                                        onCancelled,
+                                                        vaultPassphraseCapture);
                                                 return;
                                             }
                                             if (t instanceof IOException || t instanceof MasterkeyLoadingFailedException) {

@@ -29,6 +29,18 @@ class ImportFileTypeTest {
     }
 
     @Test
+    void isImage_recognizesGifAndBmp() {
+        assertTrue(ImportFileType.isImage(Path.of("a.gif")));
+        assertTrue(ImportFileType.isImage(Path.of("b.BMP")));
+    }
+
+    @Test
+    void isVideo_rejectsAviAndMpg() {
+        assertFalse(ImportFileType.isVideo(Path.of("legacy.avi")));
+        assertFalse(ImportFileType.isVideo(Path.of("old.mpg")));
+    }
+
+    @Test
     void isVideo_recognizesCommonExtensions() {
         assertTrue(ImportFileType.isVideo(Path.of("a.mp4")));
         assertTrue(ImportFileType.isVideo(Path.of("b.MOV")));

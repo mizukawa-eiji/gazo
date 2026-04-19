@@ -28,6 +28,7 @@ public final class GazoMenuBarFactory {
             Runnable onDeleteCheckedImages,
             Runnable onRestoreDeletedImages,
             Runnable onChangeVault,
+            Runnable onBackupVaultPhysically,
             Runnable onConflictThresholdSettings,
             Runnable onMenuActionsShowing) {
         MenuItem addMenu = new MenuItem("画像を追加…");
@@ -48,6 +49,8 @@ public final class GazoMenuBarFactory {
         restoreDeletedImagesMenu.setOnAction(e -> onRestoreDeletedImages.run());
         MenuItem changeVaultMenu = new MenuItem("アルバム変更…");
         changeVaultMenu.setOnAction(e -> onChangeVault.run());
+        MenuItem backupVaultPhysicalMenu = new MenuItem("アルバムを物理バックアップ…");
+        backupVaultPhysicalMenu.setOnAction(e -> onBackupVaultPhysically.run());
         MenuItem conflictThresholdMenu = new MenuItem("競合比較しきい値設定…");
         conflictThresholdMenu.setOnAction(e -> onConflictThresholdSettings.run());
         MenuItem exitMenu = new MenuItem("終了");
@@ -63,6 +66,7 @@ public final class GazoMenuBarFactory {
                         restoreDeletedImagesMenu,
                         new SeparatorMenuItem(),
                         changeVaultMenu,
+                        backupVaultPhysicalMenu,
                         conflictThresholdMenu,
                         new SeparatorMenuItem(),
                         exitMenu);
