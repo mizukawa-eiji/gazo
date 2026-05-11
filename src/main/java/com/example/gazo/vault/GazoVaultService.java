@@ -121,6 +121,21 @@ public final class GazoVaultService implements AutoCloseable {
         return storage.syncStatusSummary();
     }
 
+    /**
+     * 起動時にローカルミラーが使える状態のとき、{@link WebDavVaultStorage#prepareForOpen()} は
+     * 同期をスキップする。解錠して UI が立ち上がった後、本メソッドを別スレッドから呼んで差分同期する。
+     * ローカル Vault では何もしない。例外はリスナー経由で呼び出し側に伝える。
+     */
+    public void runWebDavBackgroundDownSyncIfNeeded() throws IOException {
+        if (storage instanceof WebDavVaultStorage w) {
+            try {
+                w.runBackgroundDownSyncIfNeeded();
+            } finally {
+                notifySyncUiCompleteIfWebDav();
+            }
+        }
+    }
+
     /** WebDAV 等へ保留中の変更を書き出す（移行完了時など）。 */
     public void flushStorageToRemote() throws IOException {
         flushStorageChanges();

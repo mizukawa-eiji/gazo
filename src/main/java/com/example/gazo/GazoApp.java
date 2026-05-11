@@ -137,6 +137,17 @@ public final class GazoApp extends Application {
      * その間はプログレスバーを不定表示にして「1 からやり直した」ように見えないようにする。
      */
     private int webDavSyncCompletedHighWater;
+    /**
+     * 解錠後にバックグラウンドで走る差分ダウン同期。WebDAV のとき真。
+     * UI のオーバーレイ（操作不能）を出さず、{@link #syncStatusLabel} の更新だけで進捗を見せる。
+     */
+    private volatile boolean webDavBackgroundSyncMode;
+    /** 解錠後の WebDAV バックグラウンド差分同期を走らせる単一スレッド。複数 Vault 切替が重なっても順序保証する。 */
+    private final ExecutorService webDavBackgroundSyncExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "gazo-webdav-bg-sync");
+        t.setDaemon(true);
+        return t;
+    });
     /** インポート中のみファイル名を表示（通常は空） */
     private Label importStatusLabel;
     /** 画像タブツールバー: フィルター後の表示数と Vault 内の画像総数 */
@@ -291,7 +302,9 @@ public final class GazoApp extends Application {
     private void applyWebDavSyncProgress(WebDavSyncProgress p) {
         if ("同期完了".equals(p.phase())) {
             webDavSyncCompletedHighWater = 0;
-            applyMainWindowBusyState(MainWindowBusyState.idle());
+            if (!webDavBackgroundSyncMode) {
+                applyMainWindowBusyState(MainWindowBusyState.idle());
+            }
             updateVaultPathLabel();
             return;
         }
@@ -304,7 +317,8 @@ public final class GazoApp extends Application {
                 p.total() >= minForOverlay
                         && webDavSyncCompletedHighWater >= 3
                         && p.completed() < webDavSyncCompletedHighWater;
-        if (p.total() >= minForOverlay) {
+        // バックグラウンド差分同期中はオーバーレイを出さない（UI 操作を阻害しないため）。
+        if (p.total() >= minForOverlay && !webDavBackgroundSyncMode) {
             String tail = p.path() == null || p.path().isEmpty() ? "" : " · " + p.path();
             if (resyncAfterConflict) {
                 applyMainWindowBusyState(
@@ -322,6 +336,45 @@ public final class GazoApp extends Application {
         webDavSyncCompletedHighWater = Math.max(webDavSyncCompletedHighWater, p.completed());
     }
 
+    /**
+     * 解錠後・Vault 切替後にバックグラウンドで差分同期を走らせる。
+     * 既に完了済みの WebDAV Vault や、ローカル Vault では即 no-op。
+     * 完了したら JavaFX スレッドでギャラリーと動画一覧を再読込する。
+     */
+    private void triggerWebDavBackgroundSync() {
+        GazoVaultService current = vault;
+        if (current == null || !current.isRemoteVault()) {
+            return;
+        }
+        webDavBackgroundSyncMode = true;
+        webDavBackgroundSyncExecutor.submit(() -> {
+            try {
+                current.runWebDavBackgroundDownSyncIfNeeded();
+                Platform.runLater(this::refreshAfterBackgroundSyncSucceeded);
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    webDavBackgroundSyncMode = false;
+                    if (syncStatusLabel != null) {
+                        syncStatusLabel.setText("同期エラー: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+                    }
+                });
+            }
+        });
+    }
+
+    private void refreshAfterBackgroundSyncSucceeded() {
+        webDavBackgroundSyncMode = false;
+        if (vault == null) {
+            return;
+        }
+        refreshTagFilterOptions();
+        refreshGallery();
+        refreshVideoList();
+        if (homeCanvasPreview != null) {
+            homeCanvasPreview.refreshRandomPreview(false);
+        }
+    }
+
     private void continueApplicationAfterVaultOpened(Stage stage) {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             flushPendingDeletes(false);
@@ -332,6 +385,7 @@ public final class GazoApp extends Application {
                 imageGallery.shutdown();
             }
             vaultHeavySerialExecutor.shutdownNow();
+            webDavBackgroundSyncExecutor.shutdownNow();
         }));
 
         primaryStage = stage;
@@ -456,6 +510,7 @@ public final class GazoApp extends Application {
                                     refreshTagFilterOptions();
                                     refreshGallery();
                                     refreshVideoList();
+                                    triggerWebDavBackgroundSync();
                                 },
                                 this::setImportStatusLabel,
                                 this::clearImportStatusLabel,
@@ -672,6 +727,8 @@ public final class GazoApp extends Application {
         // 起動直後にキャンバスプレビューを初期表示する。
         homeCanvasPreview.refreshRandomPreview(false);
         Platform.runLater(() -> homeCanvasPreview.fitToViewport());
+        // WebDAV の場合、prepareForOpen で同期スキップしているので、ここからバックグラウンドで差分同期する。
+        triggerWebDavBackgroundSync();
     }
 
     void reloadCanvasSelectionFromVault(String canvasName) {

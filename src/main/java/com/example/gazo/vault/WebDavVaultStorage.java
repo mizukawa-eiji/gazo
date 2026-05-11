@@ -3,8 +3,10 @@ package com.example.gazo.vault;
 import com.example.gazo.VaultConnection;
 
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -21,6 +23,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
@@ -30,6 +41,8 @@ import java.util.stream.Stream;
 public final class WebDavVaultStorage implements VaultStorage {
     private static final String META_FILE_NAME = "sync-state.properties";
     private static final DateTimeFormatter SYNC_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    /** ダウンロード並列数。ファイル数 × HTTP RTT のレイテンシ短縮が主目的。 */
+    private static final int DOWNLOAD_PARALLELISM = 8;
     private final VaultConnection connection;
     private final WebDavClient client;
     private final Path localMirrorPath;
@@ -41,6 +54,10 @@ public final class WebDavVaultStorage implements VaultStorage {
      * 物理コピーでミラーに Vault を詰めた直後の再解錠時、{@link #syncDownFromRemote} でミラーを消さない。
      */
     private volatile boolean physicalMirrorSeedPending;
+    /** syncDown と syncUp の同時実行を防ぐ。バックグラウンド同期中にユーザー操作が走っても順序保証する。 */
+    private final ReentrantLock syncLock = new ReentrantLock();
+    /** 本セッションでバックグラウンドダウン同期を既に完了したか。 */
+    private volatile boolean backgroundDownSyncCompleted;
 
     private record FileDown(String remotePath, String rel, String etag, Instant lastModified) {}
 
@@ -90,6 +107,7 @@ public final class WebDavVaultStorage implements VaultStorage {
                                 + remoteRootPath);
             }
             saveSyncState(new HashMap<>());
+            backgroundDownSyncCompleted = true;
             return;
         }
         if (physicalMirrorSeedPending) {
@@ -98,10 +116,39 @@ public final class WebDavVaultStorage implements VaultStorage {
             if (Files.isRegularFile(vaultMarker)) {
                 // 初回解錠でリモートに Cryptomator の骨格が既にある場合でも、ローカルミラーを消さずに続行する。
                 saveSyncState(new HashMap<>());
+                backgroundDownSyncCompleted = true;
                 return;
             }
         }
+        if (hasUsableLocalMirror()) {
+            // 既に解錠可能なミラーがある: 起動を遅らせず、バックグラウンド同期に回す。
+            return;
+        }
+        // 初回解錠やミラー欠損時のみ、解錠前にダウン同期を完了させる必要がある。
         syncDownFromRemote();
+        backgroundDownSyncCompleted = true;
+    }
+
+    /**
+     * ローカルミラーが現状のままで解錠に使えるかの軽い判定。Cryptomator は {@code vault.cryptomator} と
+     * {@code masterkey.cryptomator} があれば解錠まで進めるため、これらと sync メタの有無で判定する。
+     */
+    private boolean hasUsableLocalMirror() {
+        return Files.isRegularFile(localMirrorPath.resolve("vault.cryptomator"))
+                && Files.isRegularFile(localMirrorPath.resolve("masterkey.cryptomator"))
+                && Files.isRegularFile(metadataFilePath);
+    }
+
+    /**
+     * 解錠後にバックグラウンドで呼ぶ差分同期。{@link #prepareForOpen()} でスキップした場合、こちらが
+     * 実際のリモート差分を取り込む。本セッションで既に走り終えていれば no-op。
+     */
+    public void runBackgroundDownSyncIfNeeded() throws IOException {
+        if (backgroundDownSyncCompleted) {
+            return;
+        }
+        syncDownFromRemote();
+        backgroundDownSyncCompleted = true;
     }
 
     void setPhysicalMirrorSeedPending(boolean pending) {
@@ -170,31 +217,201 @@ public final class WebDavVaultStorage implements VaultStorage {
         }
     }
 
+    /**
+     * リモートとローカルを etag/size で比較し、差分のみ並列ダウンロード・削除する。
+     * 既存のローカルミラーは温存するため、再起動時の起動時間が劇的に短くなる。
+     */
     private void syncDownFromRemote() throws IOException {
-        clearLocalMirror();
-        Files.createDirectories(localMirrorPath);
-        List<FileDown> downloads = new ArrayList<>();
-        collectRemoteFiles(remoteRootPath, downloads);
-        int total = Math.max(1, downloads.size());
-        Map<String, SyncStateEntry> syncState = new HashMap<>();
-        int step = 0;
-        for (FileDown d : downloads) {
-            reportProgress(++step, total, "取得", d.rel());
-            Path target = localMirrorPath.resolve(d.rel());
-            Files.createDirectories(target.getParent());
-            byte[] data = client.download(d.remotePath());
-            Files.write(target, data);
-            if (d.lastModified() != null && !Instant.EPOCH.equals(d.lastModified())) {
-                Files.setLastModifiedTime(target, FileTime.from(d.lastModified()));
+        syncLock.lock();
+        try {
+            Files.createDirectories(localMirrorPath);
+            // PROPFIND でリモート全件を取得。
+            Map<String, RemoteNode> remoteNodes = listRemoteNodes(remoteRootPath);
+            Map<String, SyncStateEntry> syncState = loadSyncState();
+
+            List<FileDown> remoteFiles = new ArrayList<>();
+            for (Map.Entry<String, RemoteNode> entry : remoteNodes.entrySet()) {
+                String rel = entry.getKey();
+                if (rel.isBlank()) {
+                    continue;
+                }
+                RemoteNode node = entry.getValue();
+                if (node.directory) {
+                    continue;
+                }
+                Instant lm = node.lastModified == null ? Instant.EPOCH : node.lastModified;
+                remoteFiles.add(new FileDown(joinRemote(rel), rel, node.etag, lm));
             }
-            syncState.put(
-                    d.rel(),
-                    new SyncStateEntry(
-                            d.etag(),
-                            Files.size(target),
-                            Files.getLastModifiedTime(target).toInstant()));
+
+            Set<String> remoteRelSet = new HashSet<>();
+            for (FileDown f : remoteFiles) {
+                remoteRelSet.add(f.rel());
+            }
+            // sync state に残っていてリモートから消えたファイルはローカルからも削除する。
+            // sync state にない（=ローカルだけにある）ファイルは未アップロードの変更とみなして残す。
+            List<String> toDelete = new ArrayList<>();
+            for (String prevRel : syncState.keySet()) {
+                if (!remoteRelSet.contains(prevRel)) {
+                    toDelete.add(prevRel);
+                }
+            }
+
+            List<FileDown> toDownload = new ArrayList<>();
+            for (FileDown f : remoteFiles) {
+                if (!needsDownload(f, syncState.get(f.rel()))) {
+                    continue;
+                }
+                toDownload.add(f);
+            }
+
+            int total = Math.max(1, toDownload.size() + toDelete.size());
+            AtomicInteger step = new AtomicInteger(0);
+            // 同期状態の整合性を保つため、削除済み rel は state からも消す。
+            for (String rel : toDelete) {
+                reportProgress(step.incrementAndGet(), total, "削除", rel);
+                Path local = localMirrorPath.resolve(rel);
+                try {
+                    Files.deleteIfExists(local);
+                } catch (IOException ignored) {
+                    // best effort: 残っていても syncUp で再アップされるだけ
+                }
+                syncState.remove(rel);
+            }
+            // 並列ダウンロード。エラーは最初の 1 件を握って残りはキャンセル方向に倒す。
+            if (!toDownload.isEmpty()) {
+                Map<String, SyncStateEntry> updates = downloadAllInParallel(toDownload, step, total);
+                syncState.putAll(updates);
+            }
+            saveSyncState(syncState);
+        } finally {
+            syncLock.unlock();
         }
-        saveSyncState(syncState);
+    }
+
+    /**
+     * リモートにあるファイル {@code f} について、ローカルに反映が必要か判定する。
+     * etag が両端で取れていれば canonical 比較。取れない場合は size と前回 mtime の組合せで近似。
+     */
+    private boolean needsDownload(FileDown f, SyncStateEntry previous) {
+        Path local = localMirrorPath.resolve(f.rel());
+        if (previous == null || !Files.isRegularFile(local)) {
+            return true;
+        }
+        String remoteCanon = WebDavClient.canonicalEtagForCompare(f.etag());
+        String prevCanon = WebDavClient.canonicalEtagForCompare(previous.etag);
+        if (remoteCanon != null && prevCanon != null) {
+            return !remoteCanon.equals(prevCanon);
+        }
+        // etag が片側でも取れないサーバ向けフォールバック。
+        try {
+            if (Files.size(local) != previous.size) {
+                return true;
+            }
+        } catch (IOException e) {
+            return true;
+        }
+        if (f.lastModified() != null && !Instant.EPOCH.equals(f.lastModified())) {
+            return !sameInstantEpochMillis(f.lastModified(), previous.lastModified);
+        }
+        return false;
+    }
+
+    /**
+     * {@link #DOWNLOAD_PARALLELISM} 並列でダウンロード。tmp ファイル経由の atomic rename で、
+     * 同時にミラーを読んでいる cryptofs が中途半端な内容を見ないようにする。
+     */
+    private Map<String, SyncStateEntry> downloadAllInParallel(
+            List<FileDown> toDownload, AtomicInteger step, int total) throws IOException {
+        int parallel = Math.min(DOWNLOAD_PARALLELISM, Math.max(1, toDownload.size()));
+        ExecutorService pool =
+                Executors.newFixedThreadPool(
+                        parallel,
+                        r -> {
+                            Thread t = new Thread(r, "gazo-webdav-dl");
+                            t.setDaemon(true);
+                            return t;
+                        });
+        Map<String, SyncStateEntry> updates = new ConcurrentHashMap<>();
+        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
+        List<Future<?>> futures = new ArrayList<>(toDownload.size());
+        try {
+            for (FileDown f : toDownload) {
+                futures.add(
+                        pool.submit(
+                                () -> {
+                                    if (firstFailure.get() != null) {
+                                        return;
+                                    }
+                                    try {
+                                        SyncStateEntry entry = downloadOne(f);
+                                        updates.put(f.rel(), entry);
+                                        reportProgress(step.incrementAndGet(), total, "取得", f.rel());
+                                    } catch (Throwable t) {
+                                        firstFailure.compareAndSet(null, t);
+                                    }
+                                }));
+            }
+            for (Future<?> fu : futures) {
+                try {
+                    fu.get();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    firstFailure.compareAndSet(null, e);
+                    break;
+                } catch (ExecutionException e) {
+                    firstFailure.compareAndSet(null, e.getCause() != null ? e.getCause() : e);
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        Throwable t = firstFailure.get();
+        if (t != null) {
+            if (t instanceof IOException io) {
+                throw io;
+            }
+            if (t instanceof RuntimeException re) {
+                throw re;
+            }
+            throw new IOException("WebDAV ダウンロードに失敗: " + t.getMessage(), t);
+        }
+        return updates;
+    }
+
+    private SyncStateEntry downloadOne(FileDown f) throws IOException {
+        Path target = localMirrorPath.resolve(f.rel());
+        Files.createDirectories(target.getParent());
+        byte[] data = client.download(f.remotePath());
+        Path tmp = target.resolveSibling(target.getFileName() + ".gazo-dl-" + UUID.randomUUID());
+        Files.write(tmp, data);
+        if (f.lastModified() != null && !Instant.EPOCH.equals(f.lastModified())) {
+            try {
+                Files.setLastModifiedTime(tmp, FileTime.from(f.lastModified()));
+            } catch (IOException ignored) {
+                // mtime 反映できなくても本体は問題ない
+            }
+        }
+        try {
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            // 失敗したら tmp を始末してから再送出
+            try {
+                Files.deleteIfExists(tmp);
+            } catch (IOException ignored) {
+                // best effort
+            }
+            throw e;
+        }
+        long size = Files.size(target);
+        Instant mtime;
+        try {
+            mtime = Files.getLastModifiedTime(target).toInstant();
+        } catch (IOException e) {
+            mtime = Instant.now();
+        }
+        return new SyncStateEntry(f.etag(), size, mtime);
     }
 
     private void collectRemoteFiles(String remoteDir, List<FileDown> out) throws IOException {
@@ -213,6 +430,15 @@ public final class WebDavVaultStorage implements VaultStorage {
     }
 
     private void syncUpToRemote() throws IOException {
+        syncLock.lock();
+        try {
+            syncUpToRemoteLocked();
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
+    private void syncUpToRemoteLocked() throws IOException {
         client.ensureDirectory(remoteRootPath);
         Map<String, RemoteNode> remoteNodes = listRemoteNodes(remoteRootPath);
         LocalSnapshot local = listLocalNodes();
@@ -399,20 +625,6 @@ public final class WebDavVaultStorage implements VaultStorage {
             }
         }
         return new LocalSnapshot(directories, files);
-    }
-
-    private void clearLocalMirror() throws IOException {
-        if (!Files.exists(localMirrorPath)) {
-            return;
-        }
-        try (Stream<Path> stream = Files.walk(localMirrorPath)) {
-            List<Path> paths = stream.sorted(Comparator.reverseOrder()).toList();
-            for (Path p : paths) {
-                if (!p.equals(localMirrorPath)) {
-                    Files.deleteIfExists(p);
-                }
-            }
-        }
     }
 
     private String relativeRemotePath(String fullRemotePath) {
@@ -611,6 +823,16 @@ public final class WebDavVaultStorage implements VaultStorage {
         if (resolution == null || resolution == WebDavConflictResolution.CANCEL) {
             throw conflict;
         }
+        syncLock.lock();
+        try {
+            resolveConflictLocked(conflict, resolution);
+        } finally {
+            syncLock.unlock();
+        }
+    }
+
+    private void resolveConflictLocked(WebDavSyncConflictException conflict, WebDavConflictResolution resolution)
+            throws IOException {
         String rel = conflict.relativePath();
         Path localPath = localMirrorPath.resolve(rel);
         Files.createDirectories(localPath.getParent());
