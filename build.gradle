@@ -46,6 +46,10 @@ def appName = 'Gazo'
 def appVersion = project.version.toString()
 def appIconPath = file('packaging/windows/app-icon.ico')
 
+tasks.withType(JavaCompile) {
+    options.encoding = 'UTF-8'
+}
+
 tasks.register('fatJar', Jar) {
     group = 'build'
     description = 'Assembles an executable JAR with dependencies.'
