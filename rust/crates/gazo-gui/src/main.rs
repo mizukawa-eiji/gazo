@@ -12,7 +12,29 @@ use gazo_core::{SettingsStore, Vault, VaultConnection};
 
 slint::include_modules!();
 
+/// Slint のテキスト行分割は ICU4X を使うが、日本語(`ja`)の分割辞書を同梱していないため
+/// `icu_provider` が描画のたびに `log::warn!("ICU4X data error: No segmentation model …")`
+/// を大量に出す（表示自体は問題ない）。`icu*` ターゲットの警告だけ握りつぶす軽量ロガーで抑制する。
+struct GazoLogger;
+
+impl log::Log for GazoLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        !metadata.target().starts_with("icu")
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("[{}] {}: {}", record.level(), record.target(), record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
+static GAZO_LOGGER: GazoLogger = GazoLogger;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 自前ロガーを最初に登録（log は先勝ちのため、以降に他クレートが入れようとしても無効）。
+    let _ = log::set_logger(&GAZO_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
+
     let ui = AppWindow::new()?;
 
     // 既定のアルバム位置を設定ファイルから復元（WebDAV は未対応なので既定パス）。

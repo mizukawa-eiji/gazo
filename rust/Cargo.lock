@@ -2000,6 +2000,7 @@ name = "gazo-gui"
 version = "0.1.0"
 dependencies = [
  "gazo-core",
+ "log",
  "slint",
  "slint-build",
 ]

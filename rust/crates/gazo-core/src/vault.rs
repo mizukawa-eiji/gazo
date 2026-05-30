@@ -289,6 +289,46 @@ impl Vault {
         Ok(names)
     }
 
+    /// 画像本体（復号済み）のバイト列を読む。
+    pub fn read_image(&self, image_name: &str) -> Result<Vec<u8>> {
+        let df = self
+            .ops
+            .read_by_path(format!("{IMAGES_DIR}/{image_name}"))
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        Ok(df.content)
+    }
+
+    /// サムネイル（JPEG, 復号済み）のバイト列を読む。無ければ `None`。
+    /// サムネイルは取り込み時に生成される（`thumbnails/<画像名>.jpg`）。
+    pub fn read_thumbnail(&self, image_name: &str) -> Result<Option<Vec<u8>>> {
+        let path = format!("{THUMBNAILS_DIR}/{image_name}.jpg");
+        if self.ops.entry_type(&path).is_none() {
+            return Ok(None);
+        }
+        let df = self
+            .ops
+            .read_by_path(&path)
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        Ok(Some(df.content))
+    }
+
+    /// 画像のサムネイルが無ければ生成して書き込む。生成後（または既存）の JPEG バイトを返す。
+    /// デコード不能などで生成できない場合は `None`。
+    pub fn ensure_thumbnail(&self, image_name: &str) -> Result<Option<Vec<u8>>> {
+        if let Some(bytes) = self.read_thumbnail(image_name)? {
+            return Ok(Some(bytes));
+        }
+        let image_bytes = self.read_image(image_name)?;
+        let Some(thumb) = make_thumbnail_jpeg(&image_bytes, THUMBNAIL_MAX_EDGE) else {
+            return Ok(None);
+        };
+        self.ensure_dir(THUMBNAILS_DIR)?;
+        self.ops
+            .write_by_path(format!("{THUMBNAILS_DIR}/{image_name}.jpg"), &thumb)
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        Ok(Some(thumb))
+    }
+
     /// ローカルのファイルパスから動画 1 本を取り込む。取り込み後の Vault 内ファイル名を返す。
     pub fn import_video_from_path(&self, source: &Path) -> Result<String> {
         let name = source
@@ -723,6 +763,31 @@ mod tests {
             Vault::create(vault_path, "pw123"),
             Err(GazoError::Vault(_))
         ));
+    }
+
+    #[test]
+    fn read_image_and_thumbnail_accessors() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::create(dir.path(), "pw").unwrap();
+        let png = make_test_png(200, 120);
+        let name = vault.import_image_bytes(&png, "pic.png").unwrap();
+
+        // 本体バイトは取り込んだものと一致。
+        assert_eq!(vault.read_image(&name).unwrap(), png);
+
+        // 取り込み時にサムネイルが生成されている。
+        let thumb = vault.read_thumbnail(&name).unwrap();
+        assert!(thumb.is_some());
+        let thumb = thumb.unwrap();
+        // JPEG としてデコードでき、最大辺が 640 以下に収まる。
+        let decoded = image::load_from_memory(&thumb).unwrap();
+        assert!(decoded.width() <= 640 && decoded.height() <= 640);
+
+        // ensure_thumbnail: 既存ならそのまま返る。
+        assert!(vault.ensure_thumbnail(&name).unwrap().is_some());
+
+        // 存在しない画像のサムネイルは None。
+        assert!(vault.read_thumbnail("nope.png").unwrap().is_none());
     }
 
     #[test]

@@ -30,3 +30,4 @@ sha2 = "0.10"
 gazo-webdav = { path = "crates/gazo-webdav" }
 slint = "1"
 slint-build = "1"
+log = "0.4"

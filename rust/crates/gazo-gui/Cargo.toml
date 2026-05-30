@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 slint.workspace = true
 gazo-core = { path = "../gazo-core" }
+log.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
