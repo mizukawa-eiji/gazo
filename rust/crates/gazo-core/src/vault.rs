@@ -72,8 +72,9 @@ enum Storage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FlushResult {
     pub uploaded: usize,
+    pub downloaded: usize,
     pub deleted: usize,
-    /// ローカル・リモート双方が変化したファイル（競合解決は後続フェーズ）。
+    /// `Abort` 方針で未解決のまま残った競合ファイル。
     pub conflicts: Vec<String>,
 }
 
@@ -182,15 +183,25 @@ impl Vault {
 
     /// ローカルミラーの変更を実体ストレージへ反映する（WebDAV では up-sync）。
     /// ローカル Vault では何もしない。CLI ではバッチ操作の最後に 1 度呼ぶ想定。
+    /// 競合は `Abort`（記録のみ）で扱う。
     pub fn flush(&self) -> Result<FlushResult> {
+        self.flush_with(crate::webdav_mirror::ConflictPolicy::Abort)
+    }
+
+    /// 競合解決方針を指定して flush する。
+    pub fn flush_with(
+        &self,
+        policy: crate::webdav_mirror::ConflictPolicy,
+    ) -> Result<FlushResult> {
         match &self.storage {
             Storage::Local => Ok(FlushResult::default()),
             Storage::WebDav(mirror) => {
                 let s = mirror
-                    .sync_up()
+                    .sync_up_with(policy)
                     .map_err(|e| GazoError::Vault(e.to_string()))?;
                 Ok(FlushResult {
                     uploaded: s.uploaded,
+                    downloaded: s.downloaded,
                     deleted: s.deleted,
                     conflicts: s.conflicts,
                 })

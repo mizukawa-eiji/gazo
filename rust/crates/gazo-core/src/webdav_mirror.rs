@@ -36,9 +36,22 @@ pub struct SyncSummary {
     pub downloaded: usize,
     pub uploaded: usize,
     pub deleted: usize,
-    /// ローカル・リモート双方が前回同期後に変化したファイル（要解決）。
-    /// 競合解決（dHash 等）は後続フェーズで対応するため、ここでは記録のみ。
+    /// ローカル・リモート双方が前回同期後に変化したファイル（`Abort` 時のみ記録）。
     pub conflicts: Vec<String>,
+}
+
+/// 双方変化（twin）競合の解決方針。Java `WebDavConflictResolution` 相当。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConflictPolicy {
+    /// 解決せず記録のみ（既定）。
+    #[default]
+    Abort,
+    /// ローカルを採用してリモートへ上書き。
+    KeepLocal,
+    /// リモートを採用してローカルへ取り込む。
+    KeepRemote,
+    /// ローカルを `(conflict 日時)` 付きで別名保存し、リモートを採用。
+    ConflictCopy,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -269,6 +282,11 @@ impl<R: RemoteSource> WebDavMirror<R> {
     /// - ローカル・リモート双方が変化したファイルは競合として記録（解決は後続フェーズ）。
     ///   ただし vault.cryptomator 等の小メタファイルは、実バイトが同一なら状態だけ合わせる。
     pub fn sync_up(&self) -> Result<SyncSummary> {
+        self.sync_up_with(ConflictPolicy::Abort)
+    }
+
+    /// 競合解決方針を指定してアップロード同期する。
+    pub fn sync_up_with(&self, policy: ConflictPolicy) -> Result<SyncSummary> {
         std::fs::create_dir_all(&self.mirror_dir)?;
         self.source
             .ensure_dir(&self.remote_root)
@@ -310,8 +328,8 @@ impl<R: RemoteSource> WebDavMirror<R> {
                 if self.try_resolve_twin(rel, *size, *mtime, remote_entry, &mut state)? {
                     continue;
                 }
-                summary.conflicts.push(rel.clone());
-                continue; // 非破壊: 解決は後続フェーズ
+                self.resolve_conflict(rel, remote_entry, policy, &mut state, &mut summary)?;
+                continue;
             }
             if !local_changed && remote_changed {
                 continue; // リモートが新しい。下り同期に任せる。
@@ -416,6 +434,83 @@ impl<R: RemoteSource> WebDavMirror<R> {
         Ok(true)
     }
 
+    /// twin 競合を `policy` に従って解決する。
+    fn resolve_conflict(
+        &self,
+        rel: &str,
+        remote: Option<&RemoteEntry>,
+        policy: ConflictPolicy,
+        state: &mut BTreeMap<String, StateEntry>,
+        summary: &mut SyncSummary,
+    ) -> Result<()> {
+        match policy {
+            ConflictPolicy::Abort => {
+                summary.conflicts.push(rel.to_string());
+            }
+            ConflictPolicy::KeepLocal => {
+                // ローカルをリモートへ上書き。
+                let data = std::fs::read(self.mirror_dir.join(rel))?;
+                let new_etag = self
+                    .source
+                    .put(&join_rel(&self.remote_root, rel), &data)
+                    .map_err(MirrorError::Remote)?;
+                let (size, mtime) = self.local_meta(rel);
+                state.insert(rel.to_string(), StateEntry { etag: new_etag, size, mtime_millis: mtime });
+                summary.uploaded += 1;
+            }
+            ConflictPolicy::KeepRemote => {
+                // リモートをローカルへ取り込む。
+                let data = self
+                    .source
+                    .get(&join_rel(&self.remote_root, rel))
+                    .map_err(MirrorError::Remote)?;
+                self.write_atomic(rel, &data)?;
+                let (size, mtime) = self.local_meta(rel);
+                let etag = remote.and_then(|e| e.etag.clone());
+                state.insert(rel.to_string(), StateEntry { etag, size, mtime_millis: mtime });
+                summary.downloaded += 1;
+            }
+            ConflictPolicy::ConflictCopy => {
+                // ローカルを別名保存し、リモートを採用。別名コピーは次回 flush でアップロードされる。
+                let local_bytes = std::fs::read(self.mirror_dir.join(rel))?;
+                let copy_rel = self.unique_conflict_copy_rel(rel);
+                self.write_atomic(&copy_rel, &local_bytes)?;
+
+                let remote_bytes = self
+                    .source
+                    .get(&join_rel(&self.remote_root, rel))
+                    .map_err(MirrorError::Remote)?;
+                self.write_atomic(rel, &remote_bytes)?;
+                let (size, mtime) = self.local_meta(rel);
+                let etag = remote.and_then(|e| e.etag.clone());
+                state.insert(rel.to_string(), StateEntry { etag, size, mtime_millis: mtime });
+                // コピーは状態に入れない（未アップロード扱い）。
+                summary.downloaded += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// `(conflict 日時)` を付けた未使用の別名 rel を返す（Java `createConflictCopyPath` 相当）。
+    fn unique_conflict_copy_rel(&self, rel: &str) -> String {
+        let (dir, name) = match rel.rfind('/') {
+            Some(i) => (&rel[..i + 1], &rel[i + 1..]),
+            None => ("", rel),
+        };
+        let (base, ext) = match name.find('.') {
+            Some(i) if i > 0 => (&name[..i], &name[i..]),
+            _ => (name, ""),
+        };
+        let stamp = conflict_stamp();
+        let mut candidate = format!("{dir}{base} (conflict {stamp}){ext}");
+        let mut counter = 1;
+        while self.mirror_dir.join(&candidate).exists() {
+            candidate = format!("{dir}{base} (conflict {stamp}-{counter}){ext}");
+            counter += 1;
+        }
+        candidate
+    }
+
     fn load_state(&self) -> BTreeMap<String, StateEntry> {
         let mut out = BTreeMap::new();
         let Ok(bytes) = std::fs::read(&self.state_file) else {
@@ -476,6 +571,15 @@ fn join_rel(remote_root: &str, rel: &str) -> String {
     } else {
         format!("{remote_root}/{rel}")
     }
+}
+
+/// 競合コピー名に使うタイムスタンプ。日付ライブラリを避け epoch 秒を用いる
+/// （`(conflict <stamp>)` の一意性は呼び出し側のカウンタで担保）。
+fn conflict_stamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 /// パスの深さ（`/` の数 + 1）。ディレクトリ作成/削除の順序付け用。
@@ -836,6 +940,70 @@ mod tests {
         assert_eq!(s.uploaded, 0);
         // 非破壊: リモートは上書きされていない。
         assert_eq!(m.source.get(&"/v/d-data.c9r".to_string()).unwrap(), b"REMOTE2");
+    }
+
+    /// 双方変化（twin）競合を作って返すヘルパー。戻り値はミラー。
+    fn setup_twin_conflict(tmp: &Path) -> WebDavMirror<FakeRemote> {
+        let remote = FakeRemote::new();
+        remote.dir("/v");
+        let m = mirror(remote, tmp);
+        std::fs::create_dir_all(m.mirror_dir()).unwrap();
+        std::fs::write(m.mirror_dir().join("d.c9r"), b"LOCAL-ORIG").unwrap();
+        m.sync_up().unwrap(); // 初回 push（state 確立）
+                              // リモートが外部で変化。
+        m.source.file("/v/d.c9r", "\"remote2\"", b"REMOTE-NEW");
+        // ローカルも変化。
+        std::fs::write(m.mirror_dir().join("d.c9r"), b"LOCAL-CHANGED!!").unwrap();
+        m
+    }
+
+    #[test]
+    fn conflict_keep_local_uploads_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = setup_twin_conflict(tmp.path());
+        let s = m.sync_up_with(ConflictPolicy::KeepLocal).unwrap();
+        assert!(s.conflicts.is_empty());
+        assert_eq!(s.uploaded, 1);
+        // リモートがローカル内容で上書きされた。
+        assert_eq!(m.source.get(&"/v/d.c9r".to_string()).unwrap(), b"LOCAL-CHANGED!!");
+        // 再 sync で競合再発しない。
+        let s2 = m.sync_up_with(ConflictPolicy::Abort).unwrap();
+        assert!(s2.conflicts.is_empty());
+    }
+
+    #[test]
+    fn conflict_keep_remote_takes_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = setup_twin_conflict(tmp.path());
+        let s = m.sync_up_with(ConflictPolicy::KeepRemote).unwrap();
+        assert!(s.conflicts.is_empty());
+        assert_eq!(s.downloaded, 1);
+        // ローカルがリモート内容になった。
+        assert_eq!(std::fs::read(m.mirror_dir().join("d.c9r")).unwrap(), b"REMOTE-NEW");
+        let s2 = m.sync_up_with(ConflictPolicy::Abort).unwrap();
+        assert!(s2.conflicts.is_empty());
+    }
+
+    #[test]
+    fn conflict_copy_keeps_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let m = setup_twin_conflict(tmp.path());
+        let s = m.sync_up_with(ConflictPolicy::ConflictCopy).unwrap();
+        assert!(s.conflicts.is_empty());
+        // 原ファイルはリモート内容を採用。
+        assert_eq!(std::fs::read(m.mirror_dir().join("d.c9r")).unwrap(), b"REMOTE-NEW");
+        // ローカル版が (conflict ...) 付きで残っている。
+        let copy = std::fs::read_dir(m.mirror_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .find(|n| n.contains("(conflict"));
+        let copy = copy.expect("conflict copy exists");
+        assert_eq!(std::fs::read(m.mirror_dir().join(&copy)).unwrap(), b"LOCAL-CHANGED!!");
+        // 次の flush で別名コピーがアップロードされる。
+        let s2 = m.sync_up_with(ConflictPolicy::Abort).unwrap();
+        assert!(s2.conflicts.is_empty());
+        assert!(s2.uploaded >= 1);
     }
 
     #[test]

@@ -54,6 +54,10 @@ gazo import --webdav-endpoint https://host/remote.php/dav/files/user \
 開く前にリモート→ローカルミラーへ差分ダウンロードし、取り込み後に一括アップロードする。
 （現状 WebDAV 対応は `import`/`import-video` のみ。`delete`/`restore` は後続で対応予定。）
 
+双方が変化した競合は `--on-conflict {abort|keep-local|keep-remote|copy}`（既定 `abort`）で解決する。
+`copy` はローカル版を `(conflict …)` 付きで別名保存しリモートを採用する。画像類似度（dHash）に
+よる対話的な判断補助は GUI フェーズで提供予定。
+
 ```bash
 gazo delete       [--vault <dir>] [--password <str>] <ファイル名>...  # 画像をゴミ箱へ（論理削除）
 gazo list-deleted [--vault <dir>] [--password <str>] [--limit N]      # 最近削除した画像
@@ -84,10 +88,11 @@ JWT を自前署名して標準配置を実現している。
 - [x] 新規 Vault 作成（Java/Cryptomator 互換のルート直下マスターキー配置）
 - [x] 動画取り込み・一覧
 - [x] 削除・ゴミ箱（`.gazo-trash`）と復元
-- [ ] WebDAV ストレージ・差分同期
+- [x] WebDAV ストレージ・差分同期
   - [x] WebDAV クライアント（PROPFIND/GET/PUT/DELETE/MKCOL, Basic 認証）
   - [x] ミラー＋差分ダウンロード同期
   - [x] アップロード同期（flush）
   - [x] VaultStorage 抽象の導入と配線（`import`/`import-video` が WebDAV 対応）
-  - [ ] 競合解決（dHash しきい値）
+  - [x] 競合解決（KEEP_LOCAL/KEEP_REMOTE/CONFLICT_COPY、`--on-conflict`）。
+        dHash しきい値での対話的判定は GUI フェーズで対応
 - [ ] GUI（Slint）

@@ -124,9 +124,37 @@ struct ImportArgs {
     #[command(flatten)]
     webdav: WebDavOpts,
 
+    /// WebDAV 同期で双方が変化したときの解決方針
+    #[arg(long = "on-conflict", value_enum, default_value_t = ConflictArg::Abort)]
+    on_conflict: ConflictArg,
+
     /// 取り込むパス（`--` 以降はすべてパスとして扱う）
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     paths: Vec<String>,
+}
+
+/// `--on-conflict` の選択肢（gazo_core::ConflictPolicy に対応）。
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ConflictArg {
+    /// 解決せず中止（既定）
+    Abort,
+    /// ローカルを採用
+    KeepLocal,
+    /// リモートを採用
+    KeepRemote,
+    /// ローカルを別名保存しリモートを採用
+    Copy,
+}
+
+impl From<ConflictArg> for gazo_core::ConflictPolicy {
+    fn from(a: ConflictArg) -> Self {
+        match a {
+            ConflictArg::Abort => gazo_core::ConflictPolicy::Abort,
+            ConflictArg::KeepLocal => gazo_core::ConflictPolicy::KeepLocal,
+            ConflictArg::KeepRemote => gazo_core::ConflictPolicy::KeepRemote,
+            ConflictArg::Copy => gazo_core::ConflictPolicy::ConflictCopy,
+        }
+    }
 }
 
 /// WebDAV 接続オプション（指定時はローカル `--vault` の代わりにリモートを使う）。
@@ -231,7 +259,7 @@ fn run_import(args: ImportArgs, kind: MediaKind) -> ExitCode {
     }
 
     // WebDAV の場合はここで一括アップロード（ローカルは no-op）。
-    if let Err(code) = flush_and_report(&vault) {
+    if let Err(code) = flush_and_report(&vault, args.on_conflict.into()) {
         return code;
     }
 
@@ -242,20 +270,23 @@ fn run_import(args: ImportArgs, kind: MediaKind) -> ExitCode {
     }
 }
 
-/// 変更をリモートへ反映し、結果を表示する。競合があれば警告し終了コード 3 を返す。
-fn flush_and_report(vault: &Vault) -> std::result::Result<(), ExitCode> {
+/// 変更をリモートへ反映し、結果を表示する。未解決の競合があれば警告し終了コード 3 を返す。
+fn flush_and_report(
+    vault: &Vault,
+    policy: gazo_core::ConflictPolicy,
+) -> std::result::Result<(), ExitCode> {
     if !vault.is_remote() {
         return Ok(());
     }
-    match vault.flush() {
+    match vault.flush_with(policy) {
         Ok(result) => {
             println!(
-                "リモート同期: アップロード {} 件 / 削除 {} 件",
-                result.uploaded, result.deleted
+                "リモート同期: アップロード {} 件 / ダウンロード {} 件 / 削除 {} 件",
+                result.uploaded, result.downloaded, result.deleted
             );
             if !result.conflicts.is_empty() {
                 eprintln!(
-                    "競合のため未反映のファイルがあります（{} 件）。競合解決は未対応です:",
+                    "競合のため未反映のファイルがあります（{} 件）。--on-conflict で解決方針を指定できます:",
                     result.conflicts.len()
                 );
                 for c in &result.conflicts {
