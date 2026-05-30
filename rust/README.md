@@ -19,6 +19,10 @@ JavaFX 版 Gazo を Rust へ段階的に移植するためのワークスペー�
 | `gazo-cli`  | `gazo init` / `import` / `import-video` / `delete`・`restore`・`list-deleted`（ゴミ箱）/ `delete-video`。ローカル Vault 対象。 |
 | `gazo-webdav` | WebDAV クライアント（PROPFIND/GET/PUT/DELETE/MKCOL, Basic 認証）。reqwest(blocking)+quick-xml。差分同期の土台。 |
 
+`gazo-core::webdav_mirror` がリモート Vault を `~/.gazo/webdav-cache/<hash>` へ差分ダウンロード
+同期する（sync-state による etag/サイズ/Last-Modified 比較、削除反映、ローカル専用ファイル温存）。
+同期アルゴリズムは `RemoteSource` トレイトで抽象化し、インメモリ偽リモートで検証している。
+
 ## ビルド・テスト
 
 ```bash
@@ -69,7 +73,7 @@ JWT を自前署名して標準配置を実現している。
 - [x] 削除・ゴミ箱（`.gazo-trash`）と復元
 - [ ] WebDAV ストレージ・差分同期
   - [x] WebDAV クライアント（PROPFIND/GET/PUT/DELETE/MKCOL, Basic 認証）
-  - [ ] ミラー＋差分ダウンロード同期
+  - [x] ミラー＋差分ダウンロード同期
   - [ ] アップロード同期（flush）
   - [ ] VaultStorage 抽象の導入と配線
   - [ ] 競合解決（dHash しきい値）
