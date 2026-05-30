@@ -12,14 +12,20 @@ use gazo_core::{SettingsStore, Vault, VaultConnection};
 
 slint::include_modules!();
 
-// Slint のテキスト行分割は ICU4X を使うが、日本語(`ja`)の分割辞書を同梱していないため
-// `icu_provider` が描画のたびに `log::warn!("ICU4X data error: No segmentation model …")`
-// を大量に出す（表示自体は問題ない）。ランタイムのロガー差し替えは初期化順に左右され
-// 不確実なので、`log` の `max_level_error` フィーチャ（Cargo.toml）で warn! 呼び出しを
-// コンパイル時に無効化して抑制している。
+// Slint のテキスト行分割は ICU4X(parley→icu_segmenter) を使うが、日本語(`ja`)の分割辞書を
+// 同梱していないため `icu_provider` が描画のたびに
+// `log::warn!("ICU4X data error: No segmentation model …")` を大量に出す（表示は正常）。
+// Slint バックエンド(winit 等)がロガーを先に登録し実行時 max_level を Warn 以上にするため、
+// 自前ロガーや max_level_error フィーチャだけでは止まらない。バックエンド初期化後に
+// `log::max_level` を Off へ落として、log 経由の出力を実行時に遮断する。
+fn suppress_icu_log_spam() {
+    log::set_max_level(log::LevelFilter::Off);
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // AppWindow::new() でバックエンド（とそのロガー）が初期化されるため、その後に抑制する。
     let ui = AppWindow::new()?;
+    suppress_icu_log_spam();
 
     // 既定のアルバム位置を設定ファイルから復元（WebDAV は未対応なので既定パス）。
     let store = SettingsStore::at_home();
