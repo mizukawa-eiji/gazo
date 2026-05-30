@@ -12,6 +12,9 @@ path = "src/main.rs"
 slint.workspace = true
 gazo-core = { path = "../gazo-core" }
 log.workspace = true
+# 直接は使わないが、icu_provider の logging フィーチャを有効化して
+# 行分割の警告を log 経由（= max_level で抑制可能）にするための依存。
+icu_provider.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
