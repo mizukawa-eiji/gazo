@@ -1,0 +1,64 @@
+import { Button, LineEdit, VerticalBox } from "std-widgets.slint";
+
+// Gazo の最小 GUI。まずは Vault 解錠画面（ローカル）を提供する。
+export component AppWindow inherits Window {
+    title: "Gazo";
+    preferred-width: 900px;
+    preferred-height: 600px;
+    min-width: 480px;
+    min-height: 360px;
+
+    in-out property <string> vault-path;
+    in-out property <string> passphrase;
+    in property <string> status: "";
+    in property <bool> unlocked: false;
+    in property <int> image-count: 0;
+    callback open-vault();
+
+    VerticalBox {
+        alignment: start;
+        padding: 16px;
+        spacing: 8px;
+
+        if !root.unlocked: VerticalBox {
+            spacing: 8px;
+            Text {
+                text: "アルバムを開く";
+                font-size: 22px;
+                font-weight: 700;
+            }
+            Text { text: "アルバムのフォルダ"; }
+            LineEdit {
+                placeholder-text: "アルバムのフォルダ";
+                text <=> root.vault-path;
+            }
+            Text { text: "パスフレーズ"; }
+            LineEdit {
+                placeholder-text: "パスフレーズ";
+                input-type: password;
+                text <=> root.passphrase;
+                accepted => { root.open-vault(); }
+            }
+            Button {
+                text: "開く";
+                primary: true;
+                clicked => { root.open-vault(); }
+            }
+            if root.status != "": Text {
+                text: root.status;
+                color: #c0392b;
+                wrap: word-wrap;
+            }
+        }
+
+        if root.unlocked: VerticalBox {
+            spacing: 8px;
+            Text {
+                text: "アルバムを解錠しました";
+                font-size: 22px;
+                font-weight: 700;
+            }
+            Text { text: "\{root.image-count} 枚の画像"; }
+        }
+    }
+}

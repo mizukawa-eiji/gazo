@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gazo-core", "crates/gazo-cli", "crates/gazo-webdav"]
+members = ["crates/gazo-core", "crates/gazo-cli", "crates/gazo-webdav", "crates/gazo-gui"]
 
 [workspace.package]
 edition = "2021"
@@ -28,3 +28,5 @@ quick-xml = "0.37"
 percent-encoding = "2"
 sha2 = "0.10"
 gazo-webdav = { path = "crates/gazo-webdav" }
+slint = "1"
+slint-build = "1"

@@ -1,0 +1,16 @@
+[package]
+name = "gazo-gui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gazo-gui"
+path = "src/main.rs"
+
+[dependencies]
+slint.workspace = true
+gazo-core = { path = "../gazo-core" }
+
+[build-dependencies]
+slint-build.workspace = true
