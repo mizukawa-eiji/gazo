@@ -1,3 +1,5 @@
 {"id":"int-20d70317","kind":"field_change","created_at":"2026-05-30T09:32:37.1983574Z","actor":"mizukawa-eiji","issue_id":"gazo-vdg.1","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-ef769b70","kind":"field_change","created_at":"2026-05-30T09:32:37.3971881Z","actor":"mizukawa-eiji","issue_id":"gazo-vdg.2","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-c51476c4","kind":"field_change","created_at":"2026-05-30T09:32:37.602746Z","actor":"mizukawa-eiji","issue_id":"gazo-vdg.3","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
+{"id":"int-3cf3541b","kind":"field_change","created_at":"2026-05-30T09:43:58.3186179Z","actor":"mizukawa-eiji","issue_id":"gazo-vdg.4","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-81a039c8","kind":"field_change","created_at":"2026-05-30T09:51:13.9346148Z","actor":"mizukawa-eiji","issue_id":"gazo-vdg.4","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}

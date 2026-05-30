@@ -15,7 +15,7 @@ JavaFX 版 Gazo を Rust へ段階的に移植するためのワークスペー�
 
 | クレート | 役割 |
 |----------|------|
-| `gazo-core` | Vault 解錠・画像取り込み・サムネイル生成・タグ（Java `Properties` 互換）。`VaultOperations` を平文パスベースで利用しマウント不要。 |
+| `gazo-core` | Vault 解錠・画像取り込み・サムネイル生成・タグ（Java `Properties` 互換）・アプリ設定（`~/.gazo/settings.properties`）。`VaultOperations` を平文パスベースで利用しマウント不要。 |
 | `gazo-cli`  | `gazo import` コマンド（Java `CliImport` 相当、ローカル Vault 対象）。 |
 
 ## ビルド・テスト
@@ -35,12 +35,15 @@ gazo import [--vault <dir>] [-r] [--password <str>] [--] <パス>...
 - パスフレーズ: `--password` → 環境変数 `GAZO_PASSPHRASE` → 対話入力。
 - 終了コード: `0`=成功 / `1`=引数エラー / `2`=アルバム未検出・解錠失敗 / `3`=一部失敗。
 - ディレクトリ取り込みではフォルダ名がタグとして付与される（`-r` で再帰）。
+- `--vault` 省略時は `~/.gazo/settings.properties` の前回接続先（`lastVaultPath`）を使う。
+  前回が WebDAV のときは未対応のため `--vault` の指定を促す。
 
 ## 移植状況
 
 - [x] oxcrypt-core 実現可否の検証（Vault Format 8 読み書き）
 - [x] `gazo-core`: 解錠 / 画像取り込み（重複名回避）/ サムネイル / タグ
 - [x] `gazo-cli`: ローカル Vault への `import`
+- [x] アプリ設定ファイル（`~/.gazo/settings.properties`）の読み書き
 - [ ] WebDAV ストレージ・差分同期
 - [ ] 動画取り込み・一覧
 - [ ] GUI（Slint）

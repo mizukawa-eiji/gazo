@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 use gazo_core::media::is_image_file_name;
 use gazo_core::tags::folder_tags_for_path_under_root;
+use gazo_core::settings::{SettingsStore, VaultConnection};
 use gazo_core::Vault;
 
 #[derive(Parser)]
@@ -68,9 +69,18 @@ fn run_import(args: ImportArgs) -> ExitCode {
         return ExitCode::from(1);
     }
 
+    // --vault 省略時は設定ファイル（~/.gazo/settings.properties）の前回接続先を使う。
     let vault_dir = match args.vault {
         Some(p) => p,
-        None => default_vault_dir(),
+        None => match SettingsStore::at_home().load_initial_vault_connection() {
+            VaultConnection::Local(p) => p,
+            VaultConnection::WebDav { .. } => {
+                eprintln!(
+                    "前回の接続先は WebDAV ですが、このバージョンでは未対応です。--vault でローカルアルバムを指定してください。"
+                );
+                return ExitCode::from(1);
+            }
+        },
     };
 
     if !Vault::vault_exists(&vault_dir) {
@@ -196,13 +206,4 @@ fn resolve_passphrase(password_opt: Option<&str>) -> Option<String> {
         }
     }
     rpassword::prompt_password("アルバム パスフレーズ: ").ok()
-}
-
-/// 既定のアルバム位置 `~/.gazo/vault`。
-fn default_vault_dir() -> PathBuf {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".gazo").join("vault")
 }

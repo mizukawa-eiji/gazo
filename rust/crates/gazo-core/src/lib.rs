@@ -6,8 +6,10 @@
 
 pub mod media;
 pub mod properties;
+pub mod settings;
 pub mod tags;
 pub mod thumbnail;
 pub mod vault;
 
+pub use settings::{ConflictDHashThresholds, GallerySettings, SettingsStore, VaultConnection};
 pub use vault::{GazoError, Result, Vault};
