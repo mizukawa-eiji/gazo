@@ -952,6 +952,7 @@ dependencies = [
 name = "gazo-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "image",
  "jsonwebtoken",
  "oxcrypt-core",

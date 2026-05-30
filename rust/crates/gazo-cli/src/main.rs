@@ -30,6 +30,40 @@ enum Command {
     Import(ImportArgs),
     /// 動画をアルバムに取り込む
     ImportVideo(ImportArgs),
+    /// 画像をゴミ箱へ移動（論理削除）する
+    Delete(DeleteArgs),
+    /// 動画を完全削除する（ゴミ箱を経由しない）
+    DeleteVideo(DeleteArgs),
+    /// 最近削除した画像を一覧する
+    ListDeleted(TrashArgs),
+    /// 最近削除した画像を復元する
+    Restore(TrashArgs),
+}
+
+#[derive(Args)]
+struct DeleteArgs {
+    /// アルバムのディレクトリ（省略時は設定の前回接続先）
+    #[arg(long)]
+    vault: Option<PathBuf>,
+    /// パスフレーズ（非推奨。環境変数 GAZO_PASSPHRASE を推奨）
+    #[arg(long)]
+    password: Option<String>,
+    /// 対象の Vault 内ファイル名（複数可）
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    names: Vec<String>,
+}
+
+#[derive(Args)]
+struct TrashArgs {
+    /// アルバムのディレクトリ（省略時は設定の前回接続先）
+    #[arg(long)]
+    vault: Option<PathBuf>,
+    /// パスフレーズ（非推奨。環境変数 GAZO_PASSPHRASE を推奨）
+    #[arg(long)]
+    password: Option<String>,
+    /// 件数の上限（0 で無制限）
+    #[arg(long, default_value_t = 0)]
+    limit: usize,
 }
 
 /// 取り込むメディアの種類。画像と動画で対象拡張子と取り込み先が異なる。
@@ -102,6 +136,10 @@ fn main() -> ExitCode {
         Command::Init(args) => run_init(args),
         Command::Import(args) => run_import(args, MediaKind::Image),
         Command::ImportVideo(args) => run_import(args, MediaKind::Video),
+        Command::Delete(args) => run_delete(args, MediaKind::Image),
+        Command::DeleteVideo(args) => run_delete(args, MediaKind::Video),
+        Command::ListDeleted(args) => run_list_deleted(args),
+        Command::Restore(args) => run_restore(args),
     }
 }
 
@@ -146,41 +184,9 @@ fn run_import(args: ImportArgs, kind: MediaKind) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // --vault 省略時は設定ファイル（~/.gazo/settings.properties）の前回接続先を使う。
-    let vault_dir = match args.vault {
-        Some(p) => p,
-        None => match SettingsStore::at_home().load_initial_vault_connection() {
-            VaultConnection::Local(p) => p,
-            VaultConnection::WebDav { .. } => {
-                eprintln!(
-                    "前回の接続先は WebDAV ですが、このバージョンでは未対応です。--vault でローカルアルバムを指定してください。"
-                );
-                return ExitCode::from(1);
-            }
-        },
-    };
-
-    if !Vault::vault_exists(&vault_dir) {
-        eprintln!("アルバムが見つかりません: {}", vault_dir.display());
-        return ExitCode::from(2);
-    }
-
-    let passphrase = match resolve_passphrase(args.password.as_deref()) {
-        Some(p) => p,
-        None => {
-            eprintln!(
-                "パスフレーズを取得できませんでした（GAZO_PASSPHRASE、--password、または対話入力）。"
-            );
-            return ExitCode::from(1);
-        }
-    };
-
-    let vault = match Vault::open(&vault_dir, &passphrase) {
+    let vault = match open_existing_vault(args.vault, args.password.as_deref()) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("アルバムのロック解除に失敗しました（パスフレーズの誤りなど）: {e}");
-            return ExitCode::from(2);
-        }
+        Err(code) => return code,
     };
 
     let mut failures = 0u32;
@@ -273,6 +279,127 @@ fn is_media_path(p: &Path, kind: MediaKind) -> bool {
     p.file_name()
         .map(|n| kind.matches_name(&n.to_string_lossy()))
         .unwrap_or(false)
+}
+
+fn run_delete(args: DeleteArgs, kind: MediaKind) -> ExitCode {
+    if args.names.is_empty() {
+        eprintln!("削除対象のファイル名を 1 つ以上指定してください。");
+        return ExitCode::from(1);
+    }
+    let vault = match open_existing_vault(args.vault, args.password.as_deref()) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let mut failures = 0u32;
+    for name in &args.names {
+        let result = match kind {
+            MediaKind::Image => vault.delete_image(name),
+            MediaKind::Video => vault.delete_video(name),
+        };
+        match result {
+            Ok(()) => {
+                let where_to = match kind {
+                    MediaKind::Image => "ゴミ箱へ移動",
+                    MediaKind::Video => "削除",
+                };
+                println!("{where_to}: {name}");
+            }
+            Err(e) => {
+                eprintln!("失敗: {name} — {e}");
+                failures += 1;
+            }
+        }
+    }
+    if failures > 0 {
+        ExitCode::from(3)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn run_list_deleted(args: TrashArgs) -> ExitCode {
+    let vault = match open_existing_vault(args.vault, args.password.as_deref()) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match vault.list_recently_deleted(args.limit) {
+        Ok(items) => {
+            if items.is_empty() {
+                println!("削除済みの画像はありません。");
+            }
+            for it in items {
+                println!("{}\t(deletedAt={})", it.original_file_name, it.deleted_at_millis);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("一覧の取得に失敗しました: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_restore(args: TrashArgs) -> ExitCode {
+    let vault = match open_existing_vault(args.vault, args.password.as_deref()) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    match vault.restore_recently_deleted(args.limit) {
+        Ok(result) => {
+            println!("{} 件の画像を復元しました。", result.restored);
+            for f in &result.failures {
+                eprintln!("復元できず: {f}");
+            }
+            if result.failures.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(3)
+            }
+        }
+        Err(e) => {
+            eprintln!("復元に失敗しました: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// 既存アルバムを解決して解錠する共通処理。失敗時は適切な終了コードを返す。
+fn open_existing_vault(
+    vault: Option<PathBuf>,
+    password: Option<&str>,
+) -> std::result::Result<Vault, ExitCode> {
+    let vault_dir = match vault {
+        Some(p) => p,
+        None => match SettingsStore::at_home().load_initial_vault_connection() {
+            VaultConnection::Local(p) => p,
+            VaultConnection::WebDav { .. } => {
+                eprintln!(
+                    "前回の接続先は WebDAV ですが、このバージョンでは未対応です。--vault でローカルアルバムを指定してください。"
+                );
+                return Err(ExitCode::from(1));
+            }
+        },
+    };
+    if !Vault::vault_exists(&vault_dir) {
+        eprintln!("アルバムが見つかりません: {}", vault_dir.display());
+        return Err(ExitCode::from(2));
+    }
+    let passphrase = match resolve_passphrase(password) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "パスフレーズを取得できませんでした（GAZO_PASSPHRASE、--password、または対話入力）。"
+            );
+            return Err(ExitCode::from(1));
+        }
+    };
+    match Vault::open(&vault_dir, &passphrase) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            eprintln!("アルバムのロック解除に失敗しました（パスフレーズの誤りなど）: {e}");
+            Err(ExitCode::from(2))
+        }
+    }
 }
 
 /// パスフレーズ取得（Java 版と同順）: --password → 環境変数 → 対話入力。

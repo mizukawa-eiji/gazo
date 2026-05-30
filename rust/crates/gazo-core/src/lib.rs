@@ -12,4 +12,4 @@ pub mod thumbnail;
 pub mod vault;
 
 pub use settings::{ConflictDHashThresholds, GallerySettings, SettingsStore, VaultConnection};
-pub use vault::{GazoError, Result, Vault};
+pub use vault::{DeletedImage, GazoError, RestoreResult, Result, Vault};

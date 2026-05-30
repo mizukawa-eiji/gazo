@@ -16,7 +16,7 @@ JavaFX 版 Gazo を Rust へ段階的に移植するためのワークスペー�
 | クレート | 役割 |
 |----------|------|
 | `gazo-core` | Vault 解錠・画像取り込み・サムネイル生成・タグ（Java `Properties` 互換）・アプリ設定（`~/.gazo/settings.properties`）。`VaultOperations` を平文パスベースで利用しマウント不要。 |
-| `gazo-cli`  | `gazo init`（新規作成）/ `gazo import`（画像取り込み、Java `CliImport` 相当）/ `gazo import-video`（動画取り込み）。ローカル Vault 対象。 |
+| `gazo-cli`  | `gazo init` / `import` / `import-video` / `delete`・`restore`・`list-deleted`（ゴミ箱）/ `delete-video`。ローカル Vault 対象。 |
 
 ## ビルド・テスト
 
@@ -35,6 +35,16 @@ gazo import-video [--vault <dir>] [-r] [--password <str>] [--] <パス>...  # �
 ```
 
 `import-video` は `.mp4 .webm .m4v .mov .mkv` を `videos/` に取り込む（サムネイルなし）。
+
+```bash
+gazo delete       [--vault <dir>] [--password <str>] <ファイル名>...  # 画像をゴミ箱へ（論理削除）
+gazo list-deleted [--vault <dir>] [--password <str>] [--limit N]      # 最近削除した画像
+gazo restore      [--vault <dir>] [--password <str>] [--limit N]      # 復元
+gazo delete-video [--vault <dir>] [--password <str>] <ファイル名>...  # 動画を完全削除
+```
+
+画像削除は `.gazo-trash/` への移動（タグ・表示メタも退避）で、`restore` で元に戻せる。
+動画削除はゴミ箱を経由せず完全削除（Java 版と同じ）。
 
 `init` は Java/Cryptomator 標準レイアウト（`masterkey.cryptomator` をルート直下に置き、
 `vault.cryptomator` の kid を `masterkeyfile:masterkey.cryptomator`）でアルバムを作る。
@@ -55,5 +65,6 @@ JWT を自前署名して標準配置を実現している。
 - [x] アプリ設定ファイル（`~/.gazo/settings.properties`）の読み書き
 - [x] 新規 Vault 作成（Java/Cryptomator 互換のルート直下マスターキー配置）
 - [x] 動画取り込み・一覧
+- [x] 削除・ゴミ箱（`.gazo-trash`）と復元
 - [ ] WebDAV ストレージ・差分同期
 - [ ] GUI（Slint）

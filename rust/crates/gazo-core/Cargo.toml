@@ -11,6 +11,7 @@ image.workspace = true
 jsonwebtoken.workspace = true
 serde.workspace = true
 uuid.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
