@@ -17,6 +17,7 @@ JavaFX 版 Gazo を Rust へ段階的に移植するためのワークスペー�
 |----------|------|
 | `gazo-core` | Vault 解錠・画像取り込み・サムネイル生成・タグ（Java `Properties` 互換）・アプリ設定（`~/.gazo/settings.properties`）。`VaultOperations` を平文パスベースで利用しマウント不要。 |
 | `gazo-cli`  | `gazo init` / `import` / `import-video` / `delete`・`restore`・`list-deleted`（ゴミ箱）/ `delete-video`。ローカル Vault 対象。 |
+| `gazo-webdav` | WebDAV クライアント（PROPFIND/GET/PUT/DELETE/MKCOL, Basic 認証）。reqwest(blocking)+quick-xml。差分同期の土台。 |
 
 ## ビルド・テスト
 
@@ -67,4 +68,9 @@ JWT を自前署名して標準配置を実現している。
 - [x] 動画取り込み・一覧
 - [x] 削除・ゴミ箱（`.gazo-trash`）と復元
 - [ ] WebDAV ストレージ・差分同期
+  - [x] WebDAV クライアント（PROPFIND/GET/PUT/DELETE/MKCOL, Basic 認証）
+  - [ ] ミラー＋差分ダウンロード同期
+  - [ ] アップロード同期（flush）
+  - [ ] VaultStorage 抽象の導入と配線
+  - [ ] 競合解決（dHash しきい値）
 - [ ] GUI（Slint）

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gazo-core", "crates/gazo-cli"]
+members = ["crates/gazo-core", "crates/gazo-cli", "crates/gazo-webdav"]
 
 [workspace.package]
 edition = "2021"
@@ -22,3 +22,7 @@ jsonwebtoken = "10"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
+# WebDAV クライアント用。native-tls を避け rustls を使う。
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+quick-xml = "0.37"
+percent-encoding = "2"
