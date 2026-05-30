@@ -2,6 +2,10 @@
 .gradle/
 build/
 
+# Rust
+rust/target/
+**/*.rs.bk
+
 # Java
 *.class
 *.jar
@@ -36,3 +40,8 @@ Desktop.ini
 *.tmp
 *.swp
 *~
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
