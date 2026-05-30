@@ -21,6 +21,8 @@ JavaFX 版 Gazo を Rust へ段階的に移植するためのワークスペー�
 
 `gazo-core::webdav_mirror` がリモート Vault を `~/.gazo/webdav-cache/<hash>` へ差分ダウンロード
 同期する（sync-state による etag/サイズ/Last-Modified 比較、削除反映、ローカル専用ファイル温存）。
+アップロード同期（`sync_up`）はローカルの新規/変更を PUT・リモート専用を DELETE し、
+双方が変化したファイルは競合として記録する（メタファイルは実バイト一致なら自動解決）。
 同期アルゴリズムは `RemoteSource` トレイトで抽象化し、インメモリ偽リモートで検証している。
 
 ## ビルド・テスト
@@ -74,7 +76,7 @@ JWT を自前署名して標準配置を実現している。
 - [ ] WebDAV ストレージ・差分同期
   - [x] WebDAV クライアント（PROPFIND/GET/PUT/DELETE/MKCOL, Basic 認証）
   - [x] ミラー＋差分ダウンロード同期
-  - [ ] アップロード同期（flush）
+  - [x] アップロード同期（flush）
   - [ ] VaultStorage 抽象の導入と配線
   - [ ] 競合解決（dHash しきい値）
 - [ ] GUI（Slint）

@@ -168,11 +168,17 @@ impl WebDavClient {
         Ok(resp.bytes()?.to_vec())
     }
 
-    pub fn put(&self, path: &str, data: &[u8]) -> Result<()> {
+    /// ファイルをアップロードする。成功時、応答に `ETag` があれば返す。
+    pub fn put(&self, path: &str, data: &[u8]) -> Result<Option<String>> {
         let resp = self.method("PUT", path).body(data.to_vec()).send()?;
         let code = resp.status().as_u16();
         if (200..300).contains(&code) {
-            Ok(())
+            let etag = resp
+                .headers()
+                .get(reqwest::header::ETAG)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            Ok(etag)
         } else {
             Err(WebDavError::Status {
                 method: "PUT".into(),

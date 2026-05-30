@@ -21,15 +21,24 @@ use crate::settings::home_dir;
 /// （空文字でルート）。返す [`RemoteEntry`] の `path` はサーバ上の絶対パスでよい
 /// （ミラー側でルート相対へ変換する）。
 pub trait RemoteSource {
-    fn list(&self, rel_dir: &str) -> std::result::Result<Vec<RemoteEntry>, String>;
-    fn get(&self, rel_path: &str) -> std::result::Result<Vec<u8>, String>;
+    fn list(&self, request_path: &str) -> std::result::Result<Vec<RemoteEntry>, String>;
+    fn get(&self, request_path: &str) -> std::result::Result<Vec<u8>, String>;
+    /// アップロード。成功時に新しい ETag があれば返す。
+    fn put(&self, request_path: &str, data: &[u8]) -> std::result::Result<Option<String>, String>;
+    fn delete(&self, request_path: &str) -> std::result::Result<(), String>;
+    /// パス上の各コレクションを作成する（`mkdir -p` 相当）。
+    fn ensure_dir(&self, request_path: &str) -> std::result::Result<(), String>;
 }
 
 /// 同期結果の要約。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncSummary {
     pub downloaded: usize,
+    pub uploaded: usize,
     pub deleted: usize,
+    /// ローカル・リモート双方が前回同期後に変化したファイル（要解決）。
+    /// 競合解決（dHash 等）は後続フェーズで対応するため、ここでは記録のみ。
+    pub conflicts: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -42,12 +51,13 @@ pub enum MirrorError {
 
 type Result<T> = std::result::Result<T, MirrorError>;
 
-/// 同期状態の 1 ファイル分（etag / サイズ / Last-Modified 生文字列）。
+/// 同期状態の 1 ファイル分。`size`/`mtime_millis` は**ローカルミラー上の**値、
+/// `etag` は最後に確認した**リモート**の ETag。Java 版 `SyncStateEntry` と同義。
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StateEntry {
     etag: Option<String>,
     size: u64,
-    last_modified: String,
+    mtime_millis: i64,
 }
 
 /// WebDAV ミラー。`R` は差分同期に使うリモート実装。
@@ -147,12 +157,13 @@ impl<R: RemoteSource> WebDavMirror<R> {
                 .get(&join_rel(&self.remote_root, rel))
                 .map_err(MirrorError::Remote)?;
             self.write_atomic(rel, &data)?;
+            let (size, mtime_millis) = self.local_meta(rel);
             state.insert(
                 rel.clone(),
                 StateEntry {
                     etag: entry.etag.clone(),
-                    size: data.len() as u64,
-                    last_modified: entry.last_modified.clone().unwrap_or_default(),
+                    size,
+                    mtime_millis,
                 },
             );
             summary.downloaded += 1;
@@ -197,14 +208,8 @@ impl<R: RemoteSource> WebDavMirror<R> {
         if let (Some(r), Some(p)) = (&remote_etag, &prev_etag) {
             return r != p;
         }
-        // フォールバック: サイズ → Last-Modified。
-        match std::fs::metadata(&local) {
-            Ok(m) if m.len() != prev.size => return true,
-            Err(_) => return true,
-            _ => {}
-        }
-        let lm = remote.last_modified.clone().unwrap_or_default();
-        if !lm.is_empty() && lm != prev.last_modified {
+        // フォールバック（etag が取れないサーバ向け）: リモートのサイズが分かるなら比較。
+        if remote.content_length >= 0 && remote.content_length as u64 != prev.size {
             return true;
         }
         false
@@ -239,6 +244,178 @@ impl<R: RemoteSource> WebDavMirror<R> {
         }
     }
 
+    /// ローカルミラー上の (サイズ, mtime millis) を返す。取れなければ (0,0)。
+    fn local_meta(&self, rel: &str) -> (u64, i64) {
+        let p = self.mirror_dir.join(rel);
+        match std::fs::metadata(&p) {
+            Ok(m) => {
+                let size = m.len();
+                let mtime = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                (size, mtime)
+            }
+            Err(_) => (0, 0),
+        }
+    }
+
+    /// ローカルミラーの変更をリモートへ反映する（Java `syncUpToRemote` 相当）。
+    ///
+    /// - 新規/変更されたローカルファイルを PUT（必要なフォルダは先に MKCOL）。
+    /// - リモートにのみ存在するファイル/フォルダを DELETE。
+    /// - ローカル・リモート双方が変化したファイルは競合として記録（解決は後続フェーズ）。
+    ///   ただし vault.cryptomator 等の小メタファイルは、実バイトが同一なら状態だけ合わせる。
+    pub fn sync_up(&self) -> Result<SyncSummary> {
+        std::fs::create_dir_all(&self.mirror_dir)?;
+        self.source
+            .ensure_dir(&self.remote_root)
+            .map_err(MirrorError::Remote)?;
+
+        let mut remote: BTreeMap<String, RemoteEntry> = BTreeMap::new();
+        self.walk("", &mut remote)?;
+        let (local_dirs, local_files) = self.local_snapshot()?;
+        let mut state = self.load_state();
+        let mut summary = SyncSummary::default();
+
+        // 不足しているリモートディレクトリを浅い順に作成。
+        let mut dirs: Vec<&String> = local_dirs.iter().collect();
+        dirs.sort_by_key(|d| path_depth(d));
+        for rel in dirs {
+            if rel.is_empty() {
+                continue;
+            }
+            let exists_as_dir = remote.get(rel).map(|e| e.is_dir).unwrap_or(false);
+            if !exists_as_dir {
+                self.source
+                    .ensure_dir(&join_rel(&self.remote_root, rel))
+                    .map_err(MirrorError::Remote)?;
+            }
+        }
+
+        // ローカルファイルをアップロード。
+        for (rel, (size, mtime)) in &local_files {
+            let prev = state.get(rel);
+            let remote_entry = remote.get(rel);
+            let local_changed = local_changed(*size, *mtime, prev);
+            let remote_changed = remote_changed(remote_entry, prev);
+
+            // 双方未変更でリモートにファイルがある → 同期済み。
+            if !local_changed && !remote_changed && remote_entry.map(|e| !e.is_dir).unwrap_or(false) {
+                continue;
+            }
+            if local_changed && remote_changed {
+                if self.try_resolve_twin(rel, *size, *mtime, remote_entry, &mut state)? {
+                    continue;
+                }
+                summary.conflicts.push(rel.clone());
+                continue; // 非破壊: 解決は後続フェーズ
+            }
+            if !local_changed && remote_changed {
+                continue; // リモートが新しい。下り同期に任せる。
+            }
+            // リモートが同名ディレクトリなら消してからアップロード。
+            if remote_entry.map(|e| e.is_dir).unwrap_or(false) {
+                self.source
+                    .delete(&join_rel(&self.remote_root, rel))
+                    .map_err(MirrorError::Remote)?;
+            }
+            let data = std::fs::read(self.mirror_dir.join(rel))?;
+            let new_etag = self
+                .source
+                .put(&join_rel(&self.remote_root, rel), &data)
+                .map_err(MirrorError::Remote)?;
+            state.insert(
+                rel.clone(),
+                StateEntry {
+                    etag: new_etag,
+                    size: *size,
+                    mtime_millis: *mtime,
+                },
+            );
+            summary.uploaded += 1;
+        }
+
+        // リモートのみのファイルを削除。
+        for (rel, entry) in &remote {
+            if entry.is_dir || rel.is_empty() {
+                continue;
+            }
+            if !local_files.contains_key(rel) {
+                self.source
+                    .delete(&join_rel(&self.remote_root, rel))
+                    .map_err(MirrorError::Remote)?;
+                state.remove(rel);
+                summary.deleted += 1;
+            }
+        }
+        // リモートのみのディレクトリを深い順に削除。
+        let mut remote_only_dirs: Vec<&String> = remote
+            .iter()
+            .filter(|(rel, e)| e.is_dir && !rel.is_empty() && !local_dirs.contains(*rel))
+            .map(|(rel, _)| rel)
+            .collect();
+        remote_only_dirs.sort_by_key(|d| std::cmp::Reverse(path_depth(d)));
+        for rel in remote_only_dirs {
+            self.source
+                .delete(&join_rel(&self.remote_root, rel))
+                .map_err(MirrorError::Remote)?;
+            summary.deleted += 1;
+        }
+
+        // ローカルに無い状態エントリを掃除。
+        state.retain(|rel, _| local_files.contains_key(rel));
+        self.save_state(&state)?;
+        Ok(summary)
+    }
+
+    /// ローカルミラーを走査し (ディレクトリ rel 集合, ファイル rel -> (size,mtime)) を返す。
+    fn local_snapshot(
+        &self,
+    ) -> Result<(std::collections::BTreeSet<String>, BTreeMap<String, (u64, i64)>)> {
+        let mut dirs = std::collections::BTreeSet::new();
+        let mut files = BTreeMap::new();
+        walk_local(&self.mirror_dir, &self.mirror_dir, &mut dirs, &mut files)?;
+        Ok((dirs, files))
+    }
+
+    /// vault.cryptomator 等の小メタファイルで「両方更新」のとき、実バイトが同一なら
+    /// 競合にせず状態だけ合わせる（Java `tryResolveTwinChangeByContentEquality` 相当）。
+    fn try_resolve_twin(
+        &self,
+        rel: &str,
+        size: u64,
+        mtime: i64,
+        remote: Option<&RemoteEntry>,
+        state: &mut BTreeMap<String, StateEntry>,
+    ) -> Result<bool> {
+        let Some(remote) = remote else {
+            return Ok(false);
+        };
+        if remote.is_dir || !should_compare_bytes(rel, size) {
+            return Ok(false);
+        }
+        let local_bytes = std::fs::read(self.mirror_dir.join(rel))?;
+        let remote_bytes = match self.source.get(&join_rel(&self.remote_root, rel)) {
+            Ok(b) => b,
+            Err(_) => return Ok(false),
+        };
+        if local_bytes != remote_bytes {
+            return Ok(false);
+        }
+        state.insert(
+            rel.to_string(),
+            StateEntry {
+                etag: remote.etag.clone(),
+                size,
+                mtime_millis: mtime,
+            },
+        );
+        Ok(true)
+    }
+
     fn load_state(&self) -> BTreeMap<String, StateEntry> {
         let mut out = BTreeMap::new();
         let Ok(bytes) = std::fs::read(&self.state_file) else {
@@ -259,12 +436,13 @@ impl<R: RemoteSource> WebDavMirror<R> {
                 Some(parts[0].to_string())
             };
             let size = parts[1].parse::<u64>().unwrap_or(0);
+            let mtime_millis = parts[2].parse::<i64>().unwrap_or(0);
             out.insert(
                 rel.to_string(),
                 StateEntry {
                     etag,
                     size,
-                    last_modified: parts[2].to_string(),
+                    mtime_millis,
                 },
             );
         }
@@ -281,7 +459,7 @@ impl<R: RemoteSource> WebDavMirror<R> {
                 "{}|{}|{}",
                 s.etag.clone().unwrap_or_default(),
                 s.size,
-                s.last_modified
+                s.mtime_millis
             );
             props.insert(format!("file.{rel}"), value);
         }
@@ -298,6 +476,82 @@ fn join_rel(remote_root: &str, rel: &str) -> String {
     } else {
         format!("{remote_root}/{rel}")
     }
+}
+
+/// パスの深さ（`/` の数 + 1）。ディレクトリ作成/削除の順序付け用。
+fn path_depth(rel: &str) -> usize {
+    if rel.is_empty() {
+        0
+    } else {
+        rel.matches('/').count() + 1
+    }
+}
+
+/// ローカルファイルが前回同期後に変わったか（新規 or サイズ/mtime 差）。
+fn local_changed(size: u64, mtime: i64, prev: Option<&StateEntry>) -> bool {
+    match prev {
+        None => true,
+        Some(p) => size != p.size || mtime != p.mtime_millis,
+    }
+}
+
+/// リモートが前回同期後に変わったか。前回記録が無いときは「変わった」とみなさない
+/// （初回 push で誤競合にしないため）。判定は etag 優先、取れなければ変化なし扱い。
+fn remote_changed(remote: Option<&RemoteEntry>, prev: Option<&StateEntry>) -> bool {
+    let Some(remote) = remote else {
+        return prev.is_some();
+    };
+    if remote.is_dir {
+        return false;
+    }
+    let Some(prev) = prev else {
+        return false;
+    };
+    match (canonical_etag(remote.etag.as_deref()), canonical_etag(prev.etag.as_deref())) {
+        (Some(r), Some(p)) => r != p,
+        _ => false,
+    }
+}
+
+/// バイト比較で競合回避を試みる対象か（5MB 以下の Cryptomator メタファイル）。
+fn should_compare_bytes(rel: &str, size: u64) -> bool {
+    if size > 5_000_000 {
+        return false;
+    }
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.ends_with(".bkup") || name == "vault.cryptomator" || name == "masterkey.cryptomator"
+}
+
+/// ローカルディレクトリを再帰走査し、相対パスのディレクトリ集合とファイル情報を集める。
+fn walk_local(
+    root: &Path,
+    dir: &Path,
+    dirs: &mut std::collections::BTreeSet<String>,
+    files: &mut BTreeMap<String, (u64, i64)>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            dirs.insert(rel.clone());
+            walk_local(root, &path, dirs, files)?;
+        } else if ft.is_file() {
+            let meta = entry.metadata()?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0);
+            files.insert(rel, (meta.len(), mtime));
+        }
+    }
+    Ok(())
 }
 
 fn sha256_hex(value: &str) -> String {
@@ -324,6 +578,15 @@ impl RemoteSource for WebDavClientSource {
     fn get(&self, request_path: &str) -> std::result::Result<Vec<u8>, String> {
         self.client.get(request_path).map_err(|e| e.to_string())
     }
+    fn put(&self, request_path: &str, data: &[u8]) -> std::result::Result<Option<String>, String> {
+        self.client.put(request_path, data).map_err(|e| e.to_string())
+    }
+    fn delete(&self, request_path: &str) -> std::result::Result<(), String> {
+        self.client.delete(request_path).map_err(|e| e.to_string())
+    }
+    fn ensure_dir(&self, request_path: &str) -> std::result::Result<(), String> {
+        self.client.mkcol_all(request_path).map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +600,7 @@ mod tests {
         // path -> (is_dir, etag, content)
         nodes: RefCell<HashMap<String, FakeNode>>,
         get_count: RefCell<usize>,
+        put_seq: RefCell<u64>,
     }
     #[derive(Clone)]
     struct FakeNode {
@@ -351,6 +615,7 @@ mod tests {
             FakeRemote {
                 nodes: RefCell::new(HashMap::new()),
                 get_count: RefCell::new(0),
+                put_seq: RefCell::new(0),
             }
         }
         fn dir(&self, path: &str) {
@@ -403,6 +668,38 @@ mod tests {
                 .get(&normalize_path(rel_path))
                 .map(|n| n.content.clone())
                 .ok_or_else(|| format!("not found: {rel_path}"))
+        }
+        fn put(&self, rel_path: &str, data: &[u8]) -> std::result::Result<Option<String>, String> {
+            let mut seq = self.put_seq.borrow_mut();
+            *seq += 1;
+            let etag = format!("\"put{}\"", *seq);
+            self.nodes.borrow_mut().insert(
+                normalize_path(rel_path),
+                FakeNode {
+                    is_dir: false,
+                    etag: etag.clone(),
+                    content: data.to_vec(),
+                    last_modified: "Tue, 01 Jan 2030 00:00:00 GMT".to_string(),
+                },
+            );
+            Ok(Some(etag))
+        }
+        fn delete(&self, rel_path: &str) -> std::result::Result<(), String> {
+            let p = normalize_path(rel_path);
+            let prefix = format!("{p}/");
+            self.nodes
+                .borrow_mut()
+                .retain(|k, _| k != &p && !k.starts_with(&prefix));
+            Ok(())
+        }
+        fn ensure_dir(&self, rel_path: &str) -> std::result::Result<(), String> {
+            self.nodes.borrow_mut().entry(normalize_path(rel_path)).or_insert(FakeNode {
+                is_dir: true,
+                etag: String::new(),
+                content: vec![],
+                last_modified: String::new(),
+            });
+            Ok(())
         }
     }
 
@@ -460,6 +757,85 @@ mod tests {
         assert_eq!(s4.deleted, 1);
         assert!(!m.mirror_dir().join("d/a.c9r").exists());
         assert!(m.mirror_dir().join("vault.cryptomator").exists());
+    }
+
+    #[test]
+    fn upload_new_and_changed_then_delete_remote_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = FakeRemote::new();
+        remote.dir("/v"); // 空の Vault（ルートのみ）
+        let m = mirror(remote, tmp.path());
+
+        // ローカルミラーにファイルを用意（新規作成を模す）。
+        std::fs::create_dir_all(m.mirror_dir().join("d")).unwrap();
+        std::fs::write(m.mirror_dir().join("vault.cryptomator"), b"VAULT").unwrap();
+        std::fs::write(m.mirror_dir().join("d/a.c9r"), b"AAAA").unwrap();
+
+        // 初回アップロード: dir 作成 + 2 ファイル PUT。
+        let s1 = m.sync_up().unwrap();
+        assert_eq!(s1.uploaded, 2);
+        assert!(s1.conflicts.is_empty());
+        assert_eq!(m.source.get(&"/v/d/a.c9r".to_string()).unwrap(), b"AAAA");
+
+        // 2 回目: 変更なし → アップロードなし。
+        let s2 = m.sync_up().unwrap();
+        assert_eq!(s2.uploaded, 0);
+        assert_eq!(s2.deleted, 0);
+
+        // ローカルを変更 → 1 件だけ再アップロード。
+        std::fs::write(m.mirror_dir().join("d/a.c9r"), b"BBBBBB").unwrap();
+        let s3 = m.sync_up().unwrap();
+        assert_eq!(s3.uploaded, 1);
+        assert_eq!(m.source.get(&"/v/d/a.c9r".to_string()).unwrap(), b"BBBBBB");
+
+        // ローカルから削除 → リモートからも削除。
+        std::fs::remove_file(m.mirror_dir().join("d/a.c9r")).unwrap();
+        let s4 = m.sync_up().unwrap();
+        assert_eq!(s4.deleted, 1);
+        assert!(m.source.nodes.borrow().get("/v/d/a.c9r").is_none());
+    }
+
+    #[test]
+    fn twin_change_on_metafile_resolved_by_content_equality() {
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = FakeRemote::new();
+        remote.dir("/v");
+        let m = mirror(remote, tmp.path());
+        std::fs::create_dir_all(m.mirror_dir()).unwrap();
+        std::fs::write(m.mirror_dir().join("vault.cryptomator"), b"SAME").unwrap();
+        m.sync_up().unwrap();
+
+        // リモート etag だけ外部要因で変わったと仮定（中身は同一 SAME）。
+        m.source.file("/v/vault.cryptomator", "\"changed-remote\"", b"SAME");
+        // ローカルも mtime を更新（内容は同じ）。
+        std::fs::write(m.mirror_dir().join("vault.cryptomator"), b"SAME").unwrap();
+
+        let s = m.sync_up().unwrap();
+        // 実バイト同一なので競合にならず、アップロードもしない。
+        assert!(s.conflicts.is_empty(), "should not conflict: {:?}", s.conflicts);
+        assert_eq!(s.uploaded, 0);
+    }
+
+    #[test]
+    fn twin_change_on_data_file_is_recorded_as_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let remote = FakeRemote::new();
+        remote.dir("/v");
+        let m = mirror(remote, tmp.path());
+        std::fs::create_dir_all(m.mirror_dir()).unwrap();
+        std::fs::write(m.mirror_dir().join("d-data.c9r"), b"LOCAL1").unwrap();
+        m.sync_up().unwrap();
+
+        // リモートが外部で変化（中身も etag も別物）。
+        m.source.file("/v/d-data.c9r", "\"remote2\"", b"REMOTE2");
+        // ローカルも変化。
+        std::fs::write(m.mirror_dir().join("d-data.c9r"), b"LOCAL3xx").unwrap();
+
+        let s = m.sync_up().unwrap();
+        assert_eq!(s.conflicts, vec!["d-data.c9r".to_string()]);
+        assert_eq!(s.uploaded, 0);
+        // 非破壊: リモートは上書きされていない。
+        assert_eq!(m.source.get(&"/v/d-data.c9r".to_string()).unwrap(), b"REMOTE2");
     }
 
     #[test]
