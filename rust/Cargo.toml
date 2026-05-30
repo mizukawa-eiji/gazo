@@ -30,4 +30,6 @@ sha2 = "0.10"
 gazo-webdav = { path = "crates/gazo-webdav" }
 slint = "1"
 slint-build = "1"
-log = "0.4"
+# max_level_error: ビルド時に log の warn!/info!/debug! を呼び出し箇所ごと無効化する。
+# Slint(ICU4X) が日本語テキストの行分割で出す大量の warn ログを確実に止めるため。
+log = { version = "0.4", features = ["max_level_error"] }
