@@ -24,8 +24,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 新しいアルバム（Cryptomator 互換 Vault）を作成する
+    Init(InitArgs),
     /// 画像をアルバムに取り込む
     Import(ImportArgs),
+}
+
+#[derive(Args)]
+struct InitArgs {
+    /// 作成先ディレクトリ（省略時は ~/.gazo/vault）
+    #[arg(long)]
+    vault: Option<PathBuf>,
+
+    /// パスフレーズ（非推奨。環境変数 GAZO_PASSPHRASE を推奨）
+    #[arg(long)]
+    password: Option<String>,
 }
 
 #[derive(Args)]
@@ -54,7 +67,38 @@ struct ImportArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Init(args) => run_init(args),
         Command::Import(args) => run_import(args),
+    }
+}
+
+fn run_init(args: InitArgs) -> ExitCode {
+    let vault_dir = args
+        .vault
+        .unwrap_or_else(|| SettingsStore::at_home().default_vault_path());
+
+    if Vault::vault_exists(&vault_dir) {
+        eprintln!("その場所には既にアルバムがあります: {}", vault_dir.display());
+        return ExitCode::from(1);
+    }
+
+    let passphrase = match resolve_passphrase_with_confirm(args.password.as_deref()) {
+        Some(p) => p,
+        None => {
+            eprintln!("パスフレーズを取得できませんでした。");
+            return ExitCode::from(1);
+        }
+    };
+
+    match Vault::create(&vault_dir, &passphrase) {
+        Ok(_) => {
+            println!("アルバムを作成しました: {}", vault_dir.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("アルバムの作成に失敗しました: {e}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -206,4 +250,29 @@ fn resolve_passphrase(password_opt: Option<&str>) -> Option<String> {
         }
     }
     rpassword::prompt_password("アルバム パスフレーズ: ").ok()
+}
+
+/// 作成時のパスフレーズ取得。対話入力では確認のため 2 回入力させ一致を確認する。
+fn resolve_passphrase_with_confirm(password_opt: Option<&str>) -> Option<String> {
+    if let Some(p) = password_opt {
+        if !p.is_empty() {
+            return Some(p.to_string());
+        }
+    }
+    if let Ok(env) = std::env::var("GAZO_PASSPHRASE") {
+        if !env.is_empty() {
+            return Some(env);
+        }
+    }
+    let first = rpassword::prompt_password("新しいアルバムのパスフレーズ: ").ok()?;
+    if first.is_empty() {
+        eprintln!("空のパスフレーズは使用できません。");
+        return None;
+    }
+    let again = rpassword::prompt_password("もう一度入力してください: ").ok()?;
+    if first != again {
+        eprintln!("パスフレーズが一致しませんでした。");
+        return None;
+    }
+    Some(first)
 }

@@ -16,7 +16,7 @@ JavaFX 版 Gazo を Rust へ段階的に移植するためのワークスペー�
 | クレート | 役割 |
 |----------|------|
 | `gazo-core` | Vault 解錠・画像取り込み・サムネイル生成・タグ（Java `Properties` 互換）・アプリ設定（`~/.gazo/settings.properties`）。`VaultOperations` を平文パスベースで利用しマウント不要。 |
-| `gazo-cli`  | `gazo import` コマンド（Java `CliImport` 相当、ローカル Vault 対象）。 |
+| `gazo-cli`  | `gazo init`（新規アルバム作成）/ `gazo import`（取り込み、Java `CliImport` 相当）。ローカル Vault 対象。 |
 
 ## ビルド・テスト
 
@@ -26,11 +26,17 @@ cargo test            # 全テスト（Vault 作成→取り込み→再オー�
 cargo run -p gazo-cli -- import --help
 ```
 
-### import コマンド（現状）
+### コマンド（現状）
 
 ```bash
+gazo init   [--vault <dir>] [--password <str>]            # 新規アルバム作成
 gazo import [--vault <dir>] [-r] [--password <str>] [--] <パス>...
 ```
+
+`init` は Java/Cryptomator 標準レイアウト（`masterkey.cryptomator` をルート直下に置き、
+`vault.cryptomator` の kid を `masterkeyfile:masterkey.cryptomator`）でアルバムを作る。
+oxcrypt の `VaultCreator` は masterkey を `masterkey/` サブフォルダに作るため、
+JWT を自前署名して標準配置を実現している。
 
 - パスフレーズ: `--password` → 環境変数 `GAZO_PASSPHRASE` → 対話入力。
 - 終了コード: `0`=成功 / `1`=引数エラー / `2`=アルバム未検出・解錠失敗 / `3`=一部失敗。
@@ -44,6 +50,7 @@ gazo import [--vault <dir>] [-r] [--password <str>] [--] <パス>...
 - [x] `gazo-core`: 解錠 / 画像取り込み（重複名回避）/ サムネイル / タグ
 - [x] `gazo-cli`: ローカル Vault への `import`
 - [x] アプリ設定ファイル（`~/.gazo/settings.properties`）の読み書き
+- [x] 新規 Vault 作成（Java/Cryptomator 互換のルート直下マスターキー配置）
 - [ ] WebDAV ストレージ・差分同期
 - [ ] 動画取り込み・一覧
 - [ ] GUI（Slint）

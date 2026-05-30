@@ -16,3 +16,8 @@ image = "0.25"
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 tempfile = "3"
+# 新規 Vault の vault.cryptomator(JWT) を Java/Cryptomator 標準の kid で自前署名するため。
+# jsonwebtoken は oxcrypt-core と同一メジャー(10)に合わせ EncodingKey 型を一致させる。
+jsonwebtoken = "10"
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }

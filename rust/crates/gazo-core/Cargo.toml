@@ -8,6 +8,9 @@ license.workspace = true
 oxcrypt-core.workspace = true
 thiserror.workspace = true
 image.workspace = true
+jsonwebtoken.workspace = true
+serde.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

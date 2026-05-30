@@ -7,7 +7,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use oxcrypt_core::vault::VaultOperations;
+use oxcrypt_core::crypto::keys::MasterKey;
+use oxcrypt_core::vault::{create_masterkey_file, DirId, VaultOperations};
+use serde::Serialize;
 
 use crate::media::is_visible_user_media_name;
 use crate::properties::{self, PropMap};
@@ -19,6 +21,23 @@ const IMAGES_DIR: &str = "images";
 const THUMBNAILS_DIR: &str = "thumbnails";
 const TAGS_FILE: &str = ".gazo-tags.properties";
 const THUMBNAIL_MAX_EDGE: u32 = 640;
+
+/// Java/Cryptomator 標準のマスターキー配置（Vault ルート直下）と、それを指す JWT の kid。
+const MASTERKEY_FILE: &str = "masterkey.cryptomator";
+const VAULT_CONFIG_FILE: &str = "vault.cryptomator";
+const MASTERKEY_KID: &str = "masterkeyfile:masterkey.cryptomator";
+/// Cryptomator 既定のファイル名短縮しきい値（oxcrypt の DEFAULT_SHORTENING_THRESHOLD と同値）。
+const SHORTENING_THRESHOLD: i32 = 220;
+
+/// vault.cryptomator(JWT) の claims。Cryptomator 仕様に合わせ camelCase で出力する。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultClaims {
+    format: i32,
+    shortening_threshold: i32,
+    jti: String,
+    cipher_combo: String,
+}
 
 /// gazo-core のエラー型。
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +63,58 @@ impl Vault {
     /// 指定パスに Cryptomator Vault（`vault.cryptomator`）が存在するか。
     pub fn vault_exists(vault_path: &Path) -> bool {
         vault_path.join("vault.cryptomator").is_file()
+    }
+
+    /// 新規 Vault を作成する（Java/Cryptomator 互換のルート直下マスターキー配置）。
+    ///
+    /// 公式 Cryptomator と同じく `masterkey.cryptomator` を Vault ルートに置き、
+    /// `vault.cryptomator`(JWT) の kid を `masterkeyfile:masterkey.cryptomator` にする。
+    /// oxcrypt の `VaultCreator` は masterkey を `masterkey/` サブフォルダに作るため、
+    /// ここでは JWT を自前で署名して標準レイアウトを実現する。
+    ///
+    /// 作成後そのまま解錠した [`Vault`] を返す（同時に書いた構成の妥当性も検証される）。
+    pub fn create(vault_path: &Path, passphrase: &str) -> Result<Self> {
+        if vault_path.join(VAULT_CONFIG_FILE).exists() {
+            return Err(GazoError::Vault(format!(
+                "既にアルバムが存在します: {}",
+                vault_path.display()
+            )));
+        }
+        std::fs::create_dir_all(vault_path)?;
+
+        let master_key = MasterKey::random().map_err(|e| GazoError::Vault(e.to_string()))?;
+
+        // vault.cryptomator（ルートの masterkey を指す kid で署名）。
+        let claims = VaultClaims {
+            format: 8,
+            shortening_threshold: SHORTENING_THRESHOLD,
+            jti: uuid::Uuid::new_v4().to_string(),
+            cipher_combo: "SIV_GCM".to_string(),
+        };
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some(MASTERKEY_KID.to_string());
+        let encoding_key = master_key
+            .create_jwt_encoding_key()
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        let jwt = jsonwebtoken::encode(&header, &claims, &encoding_key)
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        std::fs::write(vault_path.join(VAULT_CONFIG_FILE), jwt)?;
+
+        // masterkey.cryptomator をルート直下に書く（Java/Cryptomator 標準）。
+        let masterkey_content =
+            create_masterkey_file(&master_key, passphrase).map_err(|e| GazoError::Vault(e.to_string()))?;
+        std::fs::write(vault_path.join(MASTERKEY_FILE), masterkey_content)?;
+
+        // ルートディレクトリの暗号ストレージパス（d/<2文字>/<30文字>）を用意する。
+        let ops = VaultOperations::new(vault_path, master_key);
+        let root_storage = ops
+            .calculate_directory_storage_path(&DirId::root())
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        std::fs::create_dir_all(&root_storage)?;
+        drop(ops);
+
+        // 解錠し直して images/thumbnails を作成（書いた構成の検証も兼ねる）。
+        Self::open(vault_path, passphrase)
     }
 
     /// パスフレーズで Vault を解錠し、必要なディレクトリを用意する。
@@ -214,14 +285,48 @@ mod tests {
     }
 
     #[test]
-    fn import_tags_thumbnail_roundtrip() {
-        use oxcrypt_core::vault::VaultCreator;
-
+    fn create_produces_java_compatible_layout() {
         let dir = tempfile::tempdir().unwrap();
         let vault_path = dir.path();
-        VaultCreator::new(vault_path, "correct horse").create().unwrap();
 
-        let vault = Vault::open(vault_path, "correct horse").unwrap();
+        let vault = Vault::create(vault_path, "pw123").unwrap();
+
+        // マスターキーはルート直下（Cryptomator 標準）。oxcrypt 既定の masterkey/ は作らない。
+        assert!(vault_path.join("masterkey.cryptomator").is_file());
+        assert!(!vault_path.join("masterkey").exists());
+        assert!(vault_path.join("vault.cryptomator").is_file());
+
+        // JWT の kid がルートの masterkey を指す。
+        let jwt = std::fs::read_to_string(vault_path.join("vault.cryptomator")).unwrap();
+        let header = jsonwebtoken::decode_header(&jwt).unwrap();
+        assert_eq!(header.kid.as_deref(), Some("masterkeyfile:masterkey.cryptomator"));
+
+        // 作成直後に取り込み・解錠ができる。
+        let png = make_test_png(64, 64);
+        let name = vault.import_image_bytes(&png, "a.png").unwrap();
+        drop(vault);
+        let reopened = Vault::open(vault_path, "pw123").unwrap();
+        assert!(reopened.list_images().unwrap().contains(&name));
+
+        // 二重作成は拒否。
+        assert!(matches!(
+            Vault::create(vault_path, "pw123"),
+            Err(GazoError::Vault(_))
+        ));
+    }
+
+    #[test]
+    fn wrong_passphrase_fails_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        Vault::create(dir.path(), "right").unwrap();
+        assert!(Vault::open(dir.path(), "wrong").is_err());
+    }
+
+    #[test]
+    fn import_tags_thumbnail_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path();
+        let vault = Vault::create(vault_path, "correct horse").unwrap();
         let png = make_test_png(800, 400);
 
         // 取り込み + 重複名回避。
