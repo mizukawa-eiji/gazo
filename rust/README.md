@@ -43,6 +43,17 @@ gazo import-video [--vault <dir>] [-r] [--password <str>] [--] <パス>...  # �
 
 `import-video` は `.mp4 .webm .m4v .mov .mkv` を `videos/` に取り込む（サムネイルなし）。
 
+WebDAV 上のアルバムへ取り込むには `--vault` の代わりに WebDAV オプションを使う:
+
+```bash
+gazo import --webdav-endpoint https://host/remote.php/dav/files/user \
+            --webdav-base-path /gazo-vault --webdav-username user [-r] <パス>...
+# パスフレーズ: GAZO_PASSPHRASE / WebDAV パスワード: GAZO_WEBDAV_PASSWORD（推奨）
+```
+
+開く前にリモート→ローカルミラーへ差分ダウンロードし、取り込み後に一括アップロードする。
+（現状 WebDAV 対応は `import`/`import-video` のみ。`delete`/`restore` は後続で対応予定。）
+
 ```bash
 gazo delete       [--vault <dir>] [--password <str>] <ファイル名>...  # 画像をゴミ箱へ（論理削除）
 gazo list-deleted [--vault <dir>] [--password <str>] [--limit N]      # 最近削除した画像
@@ -77,6 +88,6 @@ JWT を自前署名して標準配置を実現している。
   - [x] WebDAV クライアント（PROPFIND/GET/PUT/DELETE/MKCOL, Basic 認証）
   - [x] ミラー＋差分ダウンロード同期
   - [x] アップロード同期（flush）
-  - [ ] VaultStorage 抽象の導入と配線
+  - [x] VaultStorage 抽象の導入と配線（`import`/`import-video` が WebDAV 対応）
   - [ ] 競合解決（dHash しきい値）
 - [ ] GUI（Slint）

@@ -11,6 +11,8 @@ use oxcrypt_core::crypto::keys::MasterKey;
 use oxcrypt_core::vault::{create_masterkey_file, DirId, VaultOperations};
 use serde::Serialize;
 
+use crate::webdav_mirror::WebDavMirror;
+
 use crate::media::is_visible_user_media_name;
 use crate::properties::{self, PropMap};
 use crate::tags;
@@ -60,11 +62,27 @@ pub enum GazoError {
 
 pub type Result<T> = std::result::Result<T, GazoError>;
 
+/// Vault の実体ストレージ。ローカルディレクトリ、または WebDAV ミラー。
+enum Storage {
+    Local,
+    WebDav(crate::webdav_mirror::WebDavMirror<crate::webdav_mirror::WebDavClientSource>),
+}
+
+/// `flush` の結果。WebDAV の場合は同期件数と未解決の競合を含む。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlushResult {
+    pub uploaded: usize,
+    pub deleted: usize,
+    /// ローカル・リモート双方が変化したファイル（競合解決は後続フェーズ）。
+    pub conflicts: Vec<String>,
+}
+
 /// 解錠済みの Vault に対する操作ハンドル。
 pub struct Vault {
     ops: VaultOperations,
     #[allow(dead_code)]
     root: PathBuf,
+    storage: Storage,
 }
 
 impl Vault {
@@ -125,17 +143,64 @@ impl Vault {
         Self::open(vault_path, passphrase)
     }
 
-    /// パスフレーズで Vault を解錠し、必要なディレクトリを用意する。
+    /// パスフレーズでローカル Vault を解錠し、必要なディレクトリを用意する。
     pub fn open(vault_path: &Path, passphrase: &str) -> Result<Self> {
+        Self::open_with_storage(vault_path, passphrase, Storage::Local)
+    }
+
+    /// WebDAV 上の Vault を開く。解錠前にローカルミラーへ差分ダウンロード（prepareForOpen）し、
+    /// ミラーの平文ビューを解錠する。変更後は [`Vault::flush`] でリモートへ反映する。
+    pub fn open_webdav(
+        endpoint: &str,
+        base_path: &str,
+        username: &str,
+        webdav_password: &str,
+        passphrase: &str,
+    ) -> Result<Self> {
+        let mirror = WebDavMirror::connect(endpoint, base_path, username, webdav_password)
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        // prepareForOpen 相当: リモート→ローカルミラーへ差分ダウンロード。
+        mirror
+            .sync_down()
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        let mirror_dir = mirror.mirror_dir().to_path_buf();
+        Self::open_with_storage(&mirror_dir, passphrase, Storage::WebDav(mirror))
+    }
+
+    fn open_with_storage(vault_path: &Path, passphrase: &str, storage: Storage) -> Result<Self> {
         let ops = VaultOperations::open(vault_path, passphrase)
             .map_err(|e| GazoError::Vault(e.to_string()))?;
         let vault = Self {
             ops,
             root: vault_path.to_path_buf(),
+            storage,
         };
         vault.ensure_dir(IMAGES_DIR)?;
         vault.ensure_dir(THUMBNAILS_DIR)?;
         Ok(vault)
+    }
+
+    /// ローカルミラーの変更を実体ストレージへ反映する（WebDAV では up-sync）。
+    /// ローカル Vault では何もしない。CLI ではバッチ操作の最後に 1 度呼ぶ想定。
+    pub fn flush(&self) -> Result<FlushResult> {
+        match &self.storage {
+            Storage::Local => Ok(FlushResult::default()),
+            Storage::WebDav(mirror) => {
+                let s = mirror
+                    .sync_up()
+                    .map_err(|e| GazoError::Vault(e.to_string()))?;
+                Ok(FlushResult {
+                    uploaded: s.uploaded,
+                    deleted: s.deleted,
+                    conflicts: s.conflicts,
+                })
+            }
+        }
+    }
+
+    /// WebDAV 接続かどうか。
+    pub fn is_remote(&self) -> bool {
+        matches!(self.storage, Storage::WebDav(_))
     }
 
     fn ensure_dir(&self, path: &str) -> Result<()> {

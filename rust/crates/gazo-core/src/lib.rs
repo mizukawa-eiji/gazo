@@ -13,4 +13,4 @@ pub mod vault;
 pub mod webdav_mirror;
 
 pub use settings::{ConflictDHashThresholds, GallerySettings, SettingsStore, VaultConnection};
-pub use vault::{DeletedImage, GazoError, RestoreResult, Result, Vault};
+pub use vault::{DeletedImage, FlushResult, GazoError, RestoreResult, Result, Vault};

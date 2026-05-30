@@ -121,13 +121,35 @@ struct ImportArgs {
     #[arg(long)]
     password: Option<String>,
 
-    /// WebDAV 接続 URL（未対応 — 後続フェーズ）
-    #[arg(long = "webdav-endpoint")]
-    webdav_endpoint: Option<String>,
+    #[command(flatten)]
+    webdav: WebDavOpts,
 
     /// 取り込むパス（`--` 以降はすべてパスとして扱う）
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     paths: Vec<String>,
+}
+
+/// WebDAV 接続オプション（指定時はローカル `--vault` の代わりにリモートを使う）。
+#[derive(Args)]
+struct WebDavOpts {
+    /// WebDAV 接続 URL（例: https://host/remote.php/dav/files/user）
+    #[arg(long = "webdav-endpoint")]
+    endpoint: Option<String>,
+    /// WebDAV 内の Vault パス（例: /gazo-vault）
+    #[arg(long = "webdav-base-path")]
+    base_path: Option<String>,
+    /// WebDAV ユーザー名
+    #[arg(long = "webdav-username")]
+    username: Option<String>,
+    /// WebDAV パスワード（非推奨。環境変数 GAZO_WEBDAV_PASSWORD を推奨）
+    #[arg(long = "webdav-password", id = "webdav_password")]
+    password: Option<String>,
+}
+
+impl WebDavOpts {
+    fn is_specified(&self) -> bool {
+        self.endpoint.is_some() || self.base_path.is_some() || self.username.is_some()
+    }
 }
 
 fn main() -> ExitCode {
@@ -174,17 +196,13 @@ fn run_init(args: InitArgs) -> ExitCode {
 }
 
 fn run_import(args: ImportArgs, kind: MediaKind) -> ExitCode {
-    if args.webdav_endpoint.is_some() {
-        eprintln!("WebDAV 取り込みはこのバージョンでは未対応です（ローカルアルバムのみ）。");
-        return ExitCode::from(1);
-    }
     if args.paths.is_empty() {
         eprintln!("取り込むパスを 1 つ以上指定してください。");
         eprintln!("使用例: gazo import -r C:\\Photos\\trip");
         return ExitCode::from(1);
     }
 
-    let vault = match open_existing_vault(args.vault, args.password.as_deref()) {
+    let vault = match open_target_vault(args.vault, &args.webdav, args.password.as_deref()) {
         Ok(v) => v,
         Err(code) => return code,
     };
@@ -212,10 +230,45 @@ fn run_import(args: ImportArgs, kind: MediaKind) -> ExitCode {
         }
     }
 
+    // WebDAV の場合はここで一括アップロード（ローカルは no-op）。
+    if let Err(code) = flush_and_report(&vault) {
+        return code;
+    }
+
     if failures > 0 {
         ExitCode::from(3)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// 変更をリモートへ反映し、結果を表示する。競合があれば警告し終了コード 3 を返す。
+fn flush_and_report(vault: &Vault) -> std::result::Result<(), ExitCode> {
+    if !vault.is_remote() {
+        return Ok(());
+    }
+    match vault.flush() {
+        Ok(result) => {
+            println!(
+                "リモート同期: アップロード {} 件 / 削除 {} 件",
+                result.uploaded, result.deleted
+            );
+            if !result.conflicts.is_empty() {
+                eprintln!(
+                    "競合のため未反映のファイルがあります（{} 件）。競合解決は未対応です:",
+                    result.conflicts.len()
+                );
+                for c in &result.conflicts {
+                    eprintln!("  競合: {c}");
+                }
+                return Err(ExitCode::from(3));
+            }
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("リモートへの同期に失敗しました: {e}");
+            Err(ExitCode::from(2))
+        }
     }
 }
 
@@ -361,6 +414,65 @@ fn run_restore(args: TrashArgs) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `--webdav-*` 指定があれば WebDAV を、なければローカルを開く。
+fn open_target_vault(
+    vault: Option<PathBuf>,
+    webdav: &WebDavOpts,
+    password: Option<&str>,
+) -> std::result::Result<Vault, ExitCode> {
+    if !webdav.is_specified() {
+        return open_existing_vault(vault, password);
+    }
+    if vault.is_some() {
+        eprintln!("--vault と --webdav-* は同時に指定できません。");
+        return Err(ExitCode::from(1));
+    }
+    let (Some(endpoint), Some(base_path), Some(username)) =
+        (&webdav.endpoint, &webdav.base_path, &webdav.username)
+    else {
+        eprintln!("--webdav-endpoint / --webdav-base-path / --webdav-username をすべて指定してください。");
+        return Err(ExitCode::from(1));
+    };
+    let webdav_password = match resolve_webdav_password(webdav.password.as_deref()) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "WebDAV パスワードを取得できませんでした（GAZO_WEBDAV_PASSWORD、--webdav-password、または対話入力）。"
+            );
+            return Err(ExitCode::from(1));
+        }
+    };
+    let passphrase = match resolve_passphrase(password) {
+        Some(p) => p,
+        None => {
+            eprintln!("パスフレーズを取得できませんでした（GAZO_PASSPHRASE、--password、または対話入力）。");
+            return Err(ExitCode::from(1));
+        }
+    };
+    match Vault::open_webdav(endpoint, base_path, username, &webdav_password, &passphrase) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            eprintln!("WebDAV アルバムのオープンに失敗しました: {e}");
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+/// WebDAV パスワード取得（Java 版と同順）: --webdav-password → 環境変数 → 対話入力。
+fn resolve_webdav_password(opt: Option<&str>) -> Option<String> {
+    if let Some(p) = opt {
+        if !p.is_empty() {
+            return Some(p.to_string());
+        }
+    }
+    if let Ok(env) = std::env::var("GAZO_WEBDAV_PASSWORD") {
+        if !env.is_empty() {
+            return Some(env);
+        }
+    }
+    rpassword::prompt_password("WebDAV パスワード: ").ok()
 }
 
 /// 既存アルバムを解決して解錠する共通処理。失敗時は適切な終了コードを返す。
