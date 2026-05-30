@@ -18,6 +18,7 @@ use crate::thumbnail::make_thumbnail_jpeg;
 
 /// Vault 内のディレクトリ・メタファイル名（Java 版 `GazoVaultService` と一致）。
 const IMAGES_DIR: &str = "images";
+const VIDEOS_DIR: &str = "videos";
 const THUMBNAILS_DIR: &str = "thumbnails";
 const TAGS_FILE: &str = ".gazo-tags.properties";
 const THUMBNAIL_MAX_EDGE: u32 = 640;
@@ -170,12 +171,17 @@ impl Vault {
 
     /// images/ 配下で未使用のファイル名を求める（`foo.jpg` → `foo (1).jpg` …）。
     fn resolve_unique_image_name(&self, original: &str) -> Result<String> {
+        self.resolve_unique_name(IMAGES_DIR, original)
+    }
+
+    /// 指定ディレクトリ配下で未使用のファイル名を求める（`foo.x` → `foo (1).x` …）。
+    fn resolve_unique_name(&self, dir: &str, original: &str) -> Result<String> {
         let (base, ext) = split_base_ext(original);
         let mut candidate = original.to_string();
         let mut counter = 1;
         while self
             .ops
-            .entry_type(format!("{IMAGES_DIR}/{candidate}"))
+            .entry_type(format!("{dir}/{candidate}"))
             .is_some()
         {
             candidate = format!("{base} ({counter}){ext}");
@@ -189,6 +195,52 @@ impl Vault {
         let entries = self
             .ops
             .list_by_path(IMAGES_DIR)
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        let mut names: Vec<String> = entries
+            .into_iter()
+            .filter(|e| e.is_file())
+            .map(|e| e.name().to_string())
+            .filter(|n| is_visible_user_media_name(n))
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    /// ローカルのファイルパスから動画 1 本を取り込む。取り込み後の Vault 内ファイル名を返す。
+    pub fn import_video_from_path(&self, source: &Path) -> Result<String> {
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !is_visible_user_media_name(&name) {
+            return Err(GazoError::InvalidName(name));
+        }
+        let bytes = std::fs::read(source)?;
+        self.import_video_bytes(&bytes, &name)
+    }
+
+    /// バイト列から動画を取り込む（サムネイルは生成しない）。重複名は ` (n)` で回避する。
+    pub fn import_video_bytes(&self, bytes: &[u8], file_name: &str) -> Result<String> {
+        if !is_visible_user_media_name(file_name) {
+            return Err(GazoError::InvalidName(file_name.to_string()));
+        }
+        // videos/ は遅延作成（既存 Vault を開いただけでは作らない）。
+        self.ensure_dir(VIDEOS_DIR)?;
+        let dest_name = self.resolve_unique_name(VIDEOS_DIR, file_name)?;
+        self.ops
+            .write_by_path(format!("{VIDEOS_DIR}/{dest_name}"), bytes)
+            .map_err(|e| GazoError::Vault(e.to_string()))?;
+        Ok(dest_name)
+    }
+
+    /// videos/ 配下の動画ファイル名一覧（可視のもののみ）。
+    pub fn list_videos(&self) -> Result<Vec<String>> {
+        if self.ops.entry_type(VIDEOS_DIR).is_none() {
+            return Ok(Vec::new());
+        }
+        let entries = self
+            .ops
+            .list_by_path(VIDEOS_DIR)
             .map_err(|e| GazoError::Vault(e.to_string()))?;
         let mut names: Vec<String> = entries
             .into_iter()
@@ -313,6 +365,36 @@ mod tests {
             Vault::create(vault_path, "pw123"),
             Err(GazoError::Vault(_))
         ));
+    }
+
+    #[test]
+    fn video_import_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::create(dir.path(), "pw").unwrap();
+
+        // 開いただけでは videos/ は作られない。
+        assert!(vault.list_videos().unwrap().is_empty());
+
+        let fake_mp4 = b"\x00\x00\x00\x18ftypmp42 dummy video bytes".to_vec();
+        let n1 = vault.import_video_bytes(&fake_mp4, "clip.mp4").unwrap();
+        assert_eq!(n1, "clip.mp4");
+        let n2 = vault.import_video_bytes(&fake_mp4, "clip.mp4").unwrap();
+        assert_eq!(n2, "clip (1).mp4");
+
+        // 先頭ドットは拒否。
+        assert!(matches!(
+            vault.import_video_bytes(&fake_mp4, "._x.mp4"),
+            Err(GazoError::InvalidName(_))
+        ));
+
+        drop(vault);
+        let vault = Vault::open(dir.path(), "pw").unwrap();
+        let vids = vault.list_videos().unwrap();
+        assert!(vids.contains(&"clip.mp4".to_string()));
+        assert!(vids.contains(&"clip (1).mp4".to_string()));
+        // 中身が一致。
+        let back = vault.ops.read_by_path("videos/clip.mp4").unwrap();
+        assert_eq!(back.content, fake_mp4);
     }
 
     #[test]

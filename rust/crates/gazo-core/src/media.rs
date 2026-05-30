@@ -8,11 +8,20 @@ pub const VIDEO_EXTENSIONS: &[&str] = &[".mp4", ".webm", ".m4v", ".mov", ".mkv"]
 
 /// 画像ファイル名か（拡張子で判定）。先頭 `.` のファイルは対象外。
 pub fn is_image_file_name(name: &str) -> bool {
+    has_extension(name, IMAGE_EXTENSIONS)
+}
+
+/// 動画ファイル名か（拡張子で判定）。先頭 `.` のファイルは対象外。
+pub fn is_video_file_name(name: &str) -> bool {
+    has_extension(name, VIDEO_EXTENSIONS)
+}
+
+fn has_extension(name: &str, exts: &[&str]) -> bool {
     if name.starts_with('.') {
         return false;
     }
     let lower = name.to_lowercase();
-    IMAGE_EXTENSIONS.iter().any(|e| lower.ends_with(e))
+    exts.iter().any(|e| lower.ends_with(e))
 }
 
 /// ユーザー可視のメディア名か（空でなく、先頭が `.` でない）。
@@ -31,6 +40,14 @@ mod tests {
         assert!(is_image_file_name("photo.webp"));
         assert!(!is_image_file_name(".hidden.jpg"));
         assert!(!is_image_file_name("note.txt"));
+    }
+
+    #[test]
+    fn video_detection() {
+        assert!(is_video_file_name("clip.MP4"));
+        assert!(is_video_file_name("movie.mkv"));
+        assert!(!is_video_file_name(".hidden.mp4"));
+        assert!(!is_video_file_name("photo.jpg"));
     }
 
     #[test]

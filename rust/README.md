@@ -16,7 +16,7 @@ JavaFX 版 Gazo を Rust へ段階的に移植するためのワークスペー�
 | クレート | 役割 |
 |----------|------|
 | `gazo-core` | Vault 解錠・画像取り込み・サムネイル生成・タグ（Java `Properties` 互換）・アプリ設定（`~/.gazo/settings.properties`）。`VaultOperations` を平文パスベースで利用しマウント不要。 |
-| `gazo-cli`  | `gazo init`（新規アルバム作成）/ `gazo import`（取り込み、Java `CliImport` 相当）。ローカル Vault 対象。 |
+| `gazo-cli`  | `gazo init`（新規作成）/ `gazo import`（画像取り込み、Java `CliImport` 相当）/ `gazo import-video`（動画取り込み）。ローカル Vault 対象。 |
 
 ## ビルド・テスト
 
@@ -29,9 +29,12 @@ cargo run -p gazo-cli -- import --help
 ### コマンド（現状）
 
 ```bash
-gazo init   [--vault <dir>] [--password <str>]            # 新規アルバム作成
-gazo import [--vault <dir>] [-r] [--password <str>] [--] <パス>...
+gazo init         [--vault <dir>] [--password <str>]            # 新規アルバム作成
+gazo import       [--vault <dir>] [-r] [--password <str>] [--] <パス>...  # 画像
+gazo import-video [--vault <dir>] [-r] [--password <str>] [--] <パス>...  # 動画
 ```
+
+`import-video` は `.mp4 .webm .m4v .mov .mkv` を `videos/` に取り込む（サムネイルなし）。
 
 `init` は Java/Cryptomator 標準レイアウト（`masterkey.cryptomator` をルート直下に置き、
 `vault.cryptomator` の kid を `masterkeyfile:masterkey.cryptomator`）でアルバムを作る。
@@ -51,6 +54,6 @@ JWT を自前署名して標準配置を実現している。
 - [x] `gazo-cli`: ローカル Vault への `import`
 - [x] アプリ設定ファイル（`~/.gazo/settings.properties`）の読み書き
 - [x] 新規 Vault 作成（Java/Cryptomator 互換のルート直下マスターキー配置）
+- [x] 動画取り込み・一覧
 - [ ] WebDAV ストレージ・差分同期
-- [ ] 動画取り込み・一覧
 - [ ] GUI（Slint）
