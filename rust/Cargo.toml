@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/gazo-core", "crates/gazo-cli"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MPL-2.0"
+
+[workspace.dependencies]
+# Cryptomator Vault Format 8 互換の暗号ライブラリ。再現性のためコミット固定。
+oxcrypt-core = { git = "https://github.com/agucova/oxcrypt", rev = "397e30a84709f64752fda84ffdbfcbef2c298217" }
+anyhow = "1"
+thiserror = "2"
+image = "0.25"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+tempfile = "3"

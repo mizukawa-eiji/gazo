@@ -1,0 +1,13 @@
+[package]
+name = "gazo-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+oxcrypt-core.workspace = true
+thiserror.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
